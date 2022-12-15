@@ -1,0 +1,81 @@
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: aksudrsync
+  namespace: kube-system
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: aksudrsync
+rules:
+- apiGroups:
+  - ""
+  resources:
+  - nodes
+  verbs:
+  - get
+  - list
+  - watch
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: aksudrsync
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: cloud-node-manager
+subjects:
+- kind: ServiceAccount
+  name: aksudrsync
+  namespace: kube-system
+---
+apiVersion: batch/v1
+kind: CronJob
+metadata:
+  name: aksudrsync
+  namespace: kube-system
+spec:
+  schedule: "* * * * *"
+  concurrencyPolicy: Forbid
+  jobTemplate:
+    spec:
+      backoffLimit: 0
+      template:
+        spec:
+          restartPolicy: Never
+          serviceAccountName: aksudrsync
+          volumes:
+          - name: cfg
+            secret:
+              secretName: aksudrsync-cfg
+          containers:
+          - name: sync
+            image: mcr.microsoft.com/azure-cli
+            volumeMounts:
+            - name: cfg
+              mountPath: /cfg
+              readOnly: true
+            command:
+            - bash
+            - -cxe
+            - |
+              set -o pipefail
+              # az login doesn't fully support env variable based login yet, so
+              # we hard code it to password auth with a secret file for now
+              az login --service-principal -u @/cfg/clientid -p @/cfg/password --tenant @/cfg/tenant
+              TOKEN=`cat /var/run/secrets/kubernetes.io/serviceaccount/token`
+              ROUTES=`curl -q --fail-with-body \
+                          --cacert /var/run/secrets/kubernetes.io/serviceaccount/ca.crt \
+                          -H "Authorization: Bearer $TOKEN" \
+                          https://kubernetes.default/api/v1/nodes \
+                      | jq '[.items[] \
+                            | {name: .metadata.name, \
+                                properties: {addressPrefix: .spec.podCIDR, \
+                                            nextHopType: "VirtualAppliance", \
+                                            nextHopIpAddress: .status.addresses[] \
+                                                              | select(.type == "InternalIP")
+                                                              | .address}}]'`
+              az resource update --ids @/cfg/rtid --set properties.routes="$ROUTES"
+      
