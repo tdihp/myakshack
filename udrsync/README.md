@@ -15,12 +15,12 @@ How to use
 * azure account, subscription with sufficient permission.
 * knowledge and courage to understand files in this directory
 
-### Instruction
+### Instructions
 
 1. Alter `provision.sh` to update SP/tenant detail.
 2. `bash provision.sh`, observe AKS and sample UDR being created.
 3. `kubectl apply -f aksudrsync-cfg-generated.yaml`, note this file is generated
    by executing `provision.sh`.
-4. `kubectl aply -f aksudrsync-cronjob.yaml`.
-5. scale / fiddle the cluster and observe target UDR. It should be updated every
+4. `kubectl apply -f aksudrsync-cronjob.yaml`.
+5. Scale / fiddle the cluster and observe target UDR. It should be updated every
    minute.
