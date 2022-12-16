@@ -75,7 +75,7 @@ spec:
                                 properties: {addressPrefix: .spec.podCIDR, \
                                             nextHopType: "VirtualAppliance", \
                                             nextHopIpAddress: .status.addresses[] \
-                                                              | select(.type == "InternalIP")
+                                                              | select(.type == "InternalIP") \
                                                               | .address}}]'`
               az resource update --ids @/cfg/rtid --set properties.routes="$ROUTES"
       
