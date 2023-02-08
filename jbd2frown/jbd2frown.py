@@ -4,6 +4,9 @@ This file reads its own source code lines, and writes a fragmented file.
 
 Let's see how fragements of ext4 on Azure dance!
 """
+__author__ = "Ping He"
+__copyright__ = "Copyright 2023, Ping He"
+__license__ = "MIT License"
 
 
 import sys
@@ -92,5 +95,3 @@ def main():
 
 if __name__ == '__main__':
     main()
-    # make_fragmented_file('foobar.dat', 128*1024*1024, 4096)
-    # comb('foobar.dat', 128*1024*1024, 4096, 8)
