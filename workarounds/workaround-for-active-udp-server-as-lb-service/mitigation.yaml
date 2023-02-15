@@ -1,0 +1,38 @@
+apiVersion: apps/v1
+kind: DaemonSet
+metadata:
+  name: snatmitigation
+spec:
+  selector:
+    matchLabels:
+      name: snatmitigation
+  template:
+    metadata:
+      labels:
+        name: snatmitigation
+    spec:
+      hostNetwork: true
+      containers:
+      - name: snatmitigation
+        image: k8s.gcr.io/kube-proxy:v1.23.9
+        env:
+        - name: SPORT
+          value: "7777"
+        - name: SRCCIDR
+          value: 10.11.0.0/16  # this should be the pod CIDR, overkill is "fine"
+        - name: DSTCIDR
+          value: "192.168.2.0/24"
+        - name: LBIP
+          value: "10.11.0.68"
+        securityContext:
+          capabilities:
+            add: ["NET_ADMIN"]
+        command:
+        - sh
+        - -xc
+        - |
+          ENTRY='POSTROUTING -p udp -d $(DSTCIDR) -m udp --sport $(SPORT) -j SNAT --to-source $(LBIP)'
+          while true; do
+            iptables -t nat -C $ENTRY || iptables -t nat -I $ENTRY
+            sleep 10
+          done
