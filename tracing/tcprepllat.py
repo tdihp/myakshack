@@ -1,4 +1,6 @@
 #!/usr/bin/python
+# -*- coding: utf-8 -*-
+
 """
 A latency evaluation tool for REPL-ish protocols such as Redis or http <2.
 
@@ -14,21 +16,6 @@ for getting the response.
 A server receives "requests" by multiple reads, then after processing, sends
 several writes for the response. 
 
-Following events are shown:
-
-
-
-===  ======  ===================================================================
-msg  mode    Description
-===  ======  ===================================================================
-C2E  both    connect to established
-CLS  both    close
-X2X  both    state failure, always delivered
-I2R  both    incoming to read
-W2I  client  write to incoming data
-R2W  server  first read to first write
-===  ======  ===================================================================
-
 Glossary:
 
 W,WT,WRT  writing call from start to end
@@ -38,14 +25,22 @@ W,WT,WRT  writing call from start to end
   FA,FAK  all written packets are properly acked
   UW,UAW  unacked write, meaning fullack did not happen for this write
      UWS  unacked write start
+  WS,WSQ  write sequence from start to end
      WSS  write sequence start, equal to first WTS
      WSE  write sequence end, equal to last WTE 
 R,RD,RAD  reading call from start to end
   RS,RDS  start of read call
   RE,RDE  end of read call
   RA,RDA  incoming data available timing
+  RS,RSQ  read sequence from start to end
      RSS  read sequence start, equal to first RDS
      RSE  read sequence end, equal to last RDE
+H,HS,HNS  handshake of TCP  
+     HSS  handshake start
+     HSE  handshake established
+     ANY  From any state
+     CLS  any closing state
+     UNK  any unknown state
 
 Reading sequence messages
 macroscope: [WSS2RSS                                        [WSE2RSS
@@ -71,13 +66,6 @@ microscope:            [RDS2RDE]   [RDS2RDE]         [RDS2RDE]
 timings   :      RDA-->RDS-->RDE-->RDS-->RDE-->RDA-->RDS-->RDE
 
 
-
-WTA->WTS->WE->[WA->WT->WE...]->FA
-
-reading payload:
-
-[RA->]RD->RE->[RA->RD->RE...]
-
 Notes:
 
 * For each scope, we have count and (total) size of read/write calls.
@@ -99,11 +87,12 @@ Notes:
     * reads start to writes start
     * reads end to writes start
 
-* FA can happen multiple times during a write, we should capture latency and
-  write size and count of writes for it
-* 
-
+Copyright (c) 2023, Ping He.
+License: MIT
 """
+
+__author__  = "Ping He"
+__license__ = "MIT"
 
 from bcc import BPF
 import argparse
@@ -111,6 +100,7 @@ import time
 # from time import strftime, gmtime, localtime
 import datetime
 from ipaddress import ip_address
+import struct
 
 TCP_STATES = [
     "",  # pretty smart huh?
@@ -130,12 +120,21 @@ TCP_STATES = [
 
 MSG_TYPES = [
     "",
-    "C2E", #/* connect to established */
-    "CLS", #/* any close */
-    "X2X", #/* any state failure */
-    "I2R", #/* incoming to read */
-    "W2I", #/* first write to incoming available */
-    "R2W", #/* first read to first write */
+    "HSS2HSE",
+    "ANY2CLS",
+    "ANY2UNK",
+    "WTS2WTE",
+    "RDS2RDE",
+    "RDA2RDS",
+    "WSS2WSE",
+    "RSS2RSE",
+    "UWS2FAK",
+    "WSE2RSS",
+    "WSS2RSS",
+    "RSE2WSS",
+    "RSS2WSS",
+    "FAK2RDA",
+    "TRACEIT",
 ]
 
 parser = argparse.ArgumentParser(
@@ -143,6 +142,15 @@ parser = argparse.ArgumentParser(
 )
 
 parser.add_argument("--ebpf", action="store_true")
+parser.add_argument("--service-port", type=int, default=443,
+                    help="service port, default to 443")
+parser.add_argument("--service-ip", type=ip_address,
+                    help="service IP address, default to not filtering")
+parser.add_argument("--no-client", dest="client", action="store_false",
+                    help="disable tapping for clients")
+parser.add_argument("--no-server", dest="server", action="store_false",
+                    help="disable tapping for clients")
+parser.add_argument("latms", type=int, help="min latency in milliseconds")
 args = parser.parse_args()
 
 # pid = args.pid
@@ -151,16 +159,17 @@ debug = 1
 # define BPF program
 bpf_text = """
 #include <linux/sched.h>
+#include <linux/tcp.h>
 #include <net/sock.h>
 #include <net/tcp_states.h>
 
 #define MAX_SOCKS 65536
-#define MIN_LAT_NS 0
 
 enum state {
-    MON,
-    WRITING, // in writing, we don't update ts for any following writes
-    READING,
+    MON,  /* only happens after HNS */
+    HNS,
+    WSQ,
+    RSQ,
 };
 
 enum mode {
@@ -169,24 +178,40 @@ enum mode {
 };
 
 struct sock_state_t {
-    u64 ts_ns;      
-    u64 start_ns;  /* reused for connect and first write and first read */
-    u64 readable_ns;  /* first readable before a read */
-    u64 writable_ns;  /* first writable before a write */
-    u64 latest_ns;  /* latest write/read */
-    u64 latest_done_ns;  /* latest done write/read */
+    u64 seqstart_ns;  /* shared start time for HSS, WSS and RSS */
+    u64 start_ns;   /* shared start time for WTS, RDS */
+    u64 end_ns;   /* shared end time for WTE, RDE, used for marking WSE, RSE */
+    u64 uws_ns;
+    u64 fak_ns;
+    u64 rda_ns;
+    u32 seqsize;
+    u32 seqcalls;
+    u32 uwssize;
+    u32 uwscalls;
+    // u64 readable_ns;  /* first readable before a read */
+    // u64 writable_ns;  /* first writable before a write */
+    // u64 latest_ns;  /* latest write/read */
+    // u64 latest_done_ns;  /* latest done write/read */
     enum state state;
     enum mode mode;
 };
 
 enum msgtype {
-    C2E = 1, /* connect to established */
-    CLS, /* any close */
-    X2X, /* any state failure */
-    I2R, /* incoming to read */
-    W2I, /* first write to incoming available */
-    R2W, /* first read to first write */
-    D2W, /* last read to first write */
+    HSS2HSE=1,
+    ANY2CLS,
+    ANY2UNK,
+    WTS2WTE,
+    RDS2RDE,
+    RDA2RDS,
+    WSS2WSE,
+    RSS2RSE,
+    UWS2FAK,
+    WSE2RSS,
+    WSS2RSS,
+    RSE2WSS,
+    RSS2WSS,
+    FAK2RDA,
+    TRACEIT,
 };
 
 struct msg_t {
@@ -194,10 +219,10 @@ struct msg_t {
     enum msgtype msgtype;
     u64 ts_ns;
     u64 lat_ns;
-    u32 counts;
     u32 bytes;
-    int last_state;
-    int state;
+    u32 calls;
+    // int last_state;
+    // int state;
     //netinfo
     u32 saddr;
     u32 daddr;
@@ -206,22 +231,30 @@ struct msg_t {
 };
 
 BPF_HASH(sockstatemap, struct sock *, struct sock_state_t, MAX_SOCKS);
-BPF_HASH(writestatemap, u32, struct write_state_t);
+BPF_HASH(callmap, u32, struct sock *);
 BPF_PERF_OUTPUT(events);
 
 
 static inline bool is_client(struct sock *sk) {
     u16 lport = sk->__sk_common.skc_num;
     u16 dport = sk->__sk_common.skc_dport;
+    u32 saddr = sk->__sk_common.skc_rcv_saddr;
+    u32 daddr = sk->__sk_common.skc_daddr;
     dport = ntohs(dport);
-    if (dport == 443) { // TODO: make it arbitary condition
-        return true;
-    }
-    return false;
+    return IS_CLIENT_COND;
 }
 
 static inline bool is_server(struct sock *sk) {
-    return false;
+    u16 lport = sk->__sk_common.skc_num;
+    u16 dport = sk->__sk_common.skc_dport;
+    u32 saddr = sk->__sk_common.skc_rcv_saddr;
+    u32 daddr = sk->__sk_common.skc_daddr;
+    dport = ntohs(dport);
+    return IS_SERVER_COND;
+}
+
+static inline bool should_send(enum msgtype msgtype, u64 lat) {
+    return lat >= MIN_LAT_NS;
 }
 
 static inline struct sock_state_t *try_tap(struct sock *sk, bool try_client, bool try_server) {
@@ -243,8 +276,8 @@ static inline struct sock_state_t *try_tap(struct sock *sk, bool try_client, boo
 }
 
 static inline void fill_msg(struct sock *sk, struct msg_t *msg) {
-    msg->last_state = sk->sk_state;
-    msg->state = sk->sk_state;
+    // msg->last_state = sk->sk_state;
+    // msg->state = sk->sk_state;
     msg->saddr = sk->__sk_common.skc_rcv_saddr;
     msg->daddr = sk->__sk_common.skc_daddr;
     msg->lport = sk->__sk_common.skc_num;
@@ -252,6 +285,258 @@ static inline void fill_msg(struct sock *sk, struct msg_t *msg) {
     msg->dport = ntohs(dport);
 }
 
+static inline void on_hss(struct pt_regs *ctx, struct sock *sk, struct sock_state_t *sockstate, u64 now) {
+    sockstate->seqstart_ns = now;
+    sockstate->state = HNS;
+}
+
+static inline void on_hse(struct pt_regs *ctx, struct sock *sk, struct sock_state_t *sockstate, u64 now) {
+    if (sockstate->state != HNS) {  /* we ignore if we are not in handshake */
+        return;
+    }
+    u64 lat = now - sockstate->seqstart_ns;
+    sockstate->seqstart_ns = 0;  /* reset timer, ss doesn't make sense for MON state */
+    sockstate->state = MON;
+    if (!should_send(HSS2HSE, lat)) {
+        return;
+    }
+    struct msg_t msg = {};
+    msg.msgtype = HSS2HSE;
+    msg.ts_ns = now;
+    msg.lat_ns = lat;
+    fill_msg(sk, &msg);
+    events.perf_submit(ctx, &msg, sizeof(msg));
+}
+
+static inline void on_cls(struct pt_regs *ctx, struct sock *sk, struct sock_state_t *sockstate, u64 now, int state) {
+    enum msgtype msgtype;
+    u64 lat = 0;
+    switch (state) {
+        case TCP_CLOSE:  // close
+        case TCP_FIN_WAIT1:  // proactive close
+        case TCP_CLOSE_WAIT:  // got fin from remote
+        case TCP_LAST_ACK:
+            msgtype = ANY2CLS;
+            break;
+        default:
+            msgtype = ANY2UNK;
+    }
+    if (sockstate->state != MON) {
+        lat = now - sockstate->seqstart_ns;
+    }
+    sockstatemap.delete(&sk);
+    sockstate = NULL;
+    if (!should_send(msgtype, lat)) {
+        return;
+    }
+    struct msg_t msg = {};
+    msg.msgtype = msgtype;
+    msg.ts_ns = now;
+    msg.lat_ns = lat;
+    fill_msg(sk, &msg);
+    events.perf_submit(ctx, &msg, sizeof(msg));
+}
+
+static inline void on_wts(struct pt_regs *ctx, struct sock *sk, struct sock_state_t *sockstate, u64 now) {
+    u64 lat = 0;
+    struct msg_t msg = {};
+    if (sockstate->state != WSQ) {
+        if (sockstate->state == RSQ) {
+            /* RSS2RSE */
+            lat = sockstate->end_ns - sockstate->seqstart_ns;
+            if (should_send(RSS2RSE, lat)) {
+                msg.msgtype = RSS2RSE;
+                msg.ts_ns = sockstate->end_ns;
+                msg.lat_ns = lat;
+                msg.bytes = sockstate->seqsize;
+                msg.calls = sockstate->seqcalls;
+                fill_msg(sk, &msg);
+                events.perf_submit(ctx, &msg, sizeof(msg));
+            }
+            /* RSE2WSS */
+            lat = now - sockstate->end_ns;
+            if (sockstate->mode == SERVER && should_send(RSE2WSS, lat)) {
+                msg.msgtype = RSE2WSS;
+                msg.ts_ns = now;
+                msg.lat_ns = lat;
+                msg.bytes = 0;
+                msg.calls = 0;
+                fill_msg(sk, &msg);
+                events.perf_submit(ctx, &msg, sizeof(msg));
+            }
+            /* RSS2WSS */
+            lat = now - sockstate->seqstart_ns;
+            if (sockstate->mode == SERVER && should_send(RSS2WSS, lat)) {
+                msg.msgtype = RSS2WSS;
+                msg.ts_ns = now;
+                msg.lat_ns = lat;
+                msg.bytes = sockstate->seqsize;
+                msg.calls = sockstate->seqcalls;
+                fill_msg(sk, &msg);
+                events.perf_submit(ctx, &msg, sizeof(msg));
+            }
+        }
+        sockstate->state = WSQ;
+        sockstate->seqstart_ns = now;
+        sockstate->seqcalls = 0;
+        sockstate->seqsize = 0;
+    }
+    sockstate->start_ns = now;
+    sockstate->seqcalls += 1;
+    if (!sockstate->uws_ns) {
+        sockstate->uws_ns = now;
+    }
+    sockstate->uwscalls += 1;
+}
+
+static inline void on_wte(struct pt_regs *ctx, struct sock *sk, struct sock_state_t *sockstate, u64 now, int rtn) {
+    sockstate->end_ns = now;
+    u32 size = 0;
+    if (rtn > 0) {
+        size = rtn;
+    }
+    sockstate->seqsize += size;
+    sockstate->uwssize += size;
+    /* deliver WTS2WTE */
+    u64 lat = now - sockstate->start_ns;
+    if (!should_send(WTS2WTE, lat)) {
+        return;
+    }
+    struct msg_t msg = {};
+    msg.msgtype = WTS2WTE;
+    msg.ts_ns = now;
+    msg.lat_ns = lat;
+    msg.bytes = size;
+    msg.calls = 1;
+    fill_msg(sk, &msg);
+    events.perf_submit(ctx, &msg, sizeof(msg));
+}
+
+static inline void on_rds(struct pt_regs *ctx, struct sock *sk, struct sock_state_t *sockstate, u64 now) {
+    u64 lat = 0;
+    struct msg_t msg = {};
+    if (sockstate->state != RSQ) {
+        if (sockstate->state == WSQ) {
+            /* WSS2WSE */
+            lat = sockstate->end_ns - sockstate->seqstart_ns;
+            if (should_send(WSS2WSE, lat)) {
+                msg.msgtype = WSS2WSE;
+                msg.ts_ns = sockstate->end_ns;
+                msg.lat_ns = lat;
+                msg.bytes = sockstate->seqsize;
+                msg.calls = sockstate->seqcalls;
+                fill_msg(sk, &msg);
+                events.perf_submit(ctx, &msg, sizeof(msg));
+            }
+            /* WSE2RSS */
+            lat = now - sockstate->end_ns;
+            if (sockstate->mode == CLIENT && should_send(WSE2RSS, lat)) {
+                msg.msgtype = WSE2RSS;
+                msg.ts_ns = now;
+                msg.lat_ns = lat;
+                msg.bytes = 0;
+                msg.calls = 0;
+                fill_msg(sk, &msg);
+                events.perf_submit(ctx, &msg, sizeof(msg));
+            }
+            /* WSS2RSS */
+            lat = now - sockstate->seqstart_ns;
+            if (sockstate->mode == CLIENT && should_send(WSS2RSS, lat)) {
+                msg.msgtype = WSS2RSS;
+                msg.ts_ns = now;
+                msg.lat_ns = lat;
+                msg.bytes = sockstate->seqsize;
+                msg.calls = sockstate->seqcalls;
+                fill_msg(sk, &msg);
+                events.perf_submit(ctx, &msg, sizeof(msg));
+            }
+        }
+        sockstate->state = RSQ;
+        sockstate->seqstart_ns = now;
+        sockstate->seqcalls = 0;
+        sockstate->seqsize = 0;
+    }
+    sockstate->start_ns = now;
+    sockstate->seqcalls += 1;
+    /* RDA2RDS */
+    if (!sockstate->rda_ns) {
+        return;
+    }
+    lat = now - sockstate->rda_ns;
+    sockstate->rda_ns = 0;
+    if (!should_send(RDA2RDS, lat)) {
+        return;
+    }
+    msg.msgtype = RDA2RDS;
+    msg.ts_ns = now;
+    msg.lat_ns = lat;
+    fill_msg(sk, &msg);
+    events.perf_submit(ctx, &msg, sizeof(msg));
+}
+
+static inline void on_rde(struct pt_regs *ctx, struct sock *sk, struct sock_state_t *sockstate, u64 now, int rtn) {
+    sockstate->end_ns = now;
+    u32 size = 0;
+    if (rtn > 0) {
+        size = rtn;
+    }
+    sockstate->seqsize += size;
+    sockstate->rda_ns = 0;
+    /* deliver RDS2RDE */
+    u64 lat = now - sockstate->start_ns;
+    if (!should_send(RDS2RDE, lat)) {
+        return;
+    }
+    struct msg_t msg = {};
+    msg.msgtype = RDS2RDE;
+    msg.ts_ns = now;
+    msg.lat_ns = lat;
+    msg.bytes = size;
+    msg.calls = 1;
+    fill_msg(sk, &msg);
+    events.perf_submit(ctx, &msg, sizeof(msg));
+}
+
+static inline void on_rda(struct pt_regs *ctx, struct sock *sk, struct sock_state_t *sockstate, u64 now) {
+    /* FAK2RDA */
+    if (sockstate->fak_ns) {
+        u64 lat = now - sockstate->fak_ns;
+        sockstate->fak_ns = 0;
+        if (sockstate->mode == CLIENT && should_send(FAK2RDA, lat)) {
+            struct msg_t msg = {};
+            msg.msgtype = FAK2RDA;
+            msg.ts_ns = now;
+            msg.lat_ns = lat;
+            fill_msg(sk, &msg);
+            events.perf_submit(ctx, &msg, sizeof(msg));
+        }
+    }
+    if (!sockstate->rda_ns) {
+        sockstate->rda_ns = now;
+    }
+}
+
+static inline void on_fak(struct pt_regs *ctx, struct sock *sk, struct sock_state_t *sockstate, u64 now) {
+    sockstate->fak_ns = now;
+    if (sockstate->uws_ns) {
+        u64 lat = now - sockstate->uws_ns;
+        if (should_send(UWS2FAK, lat)) {
+            struct msg_t msg = {};
+            msg.msgtype = UWS2FAK;
+            msg.ts_ns = now;
+            msg.lat_ns = lat;
+            msg.bytes = sockstate->uwssize;
+            msg.calls = sockstate->uwscalls;
+            fill_msg(sk, &msg);
+            events.perf_submit(ctx, &msg, sizeof(msg));
+        }
+        sockstate->uws_ns = 0;
+        sockstate->uwssize = 0;
+        sockstate->uwscalls = 0;
+    }
+}
+
+/* checkpoint for HSS */
 int trace_tcp_connect(struct pt_regs *ctx, struct sock *sk) {
     if (sk->__sk_common.skc_family != AF_INET) {
         return 0;
@@ -261,12 +546,12 @@ int trace_tcp_connect(struct pt_regs *ctx, struct sock *sk) {
 
     sockstate = try_tap(sk, true, false);
     if (sockstate != NULL) {
-        sockstate->start_ns = now;
-        sockstate->state = MON;
+        on_hss(ctx, sk, sockstate, now);
     }
     return 0;
 }
 
+/* checkpoint for HSS, HSE, CLS, UNK */
 int trace_tcp_set_state(struct pt_regs *ctx, struct sock *sk, int state) {
     if (sk->__sk_common.skc_family != AF_INET) {
         return 0;
@@ -277,67 +562,35 @@ int trace_tcp_set_state(struct pt_regs *ctx, struct sock *sk, int state) {
     struct msg_t msg = {};
     struct sock_state_t * sockstate = sockstatemap.lookup(&sk);
 
-    if (sockstate && sockstate->start_ns) {
-        lat = now - sockstate->start_ns;
-    }
-
     switch (state) {
         case TCP_ESTABLISHED:
-            if (sockstate == NULL) {
-                return 0;
+            if (sockstate != NULL) {
+                on_hse(ctx, sk, sockstate, now);
             }
-            sockstate->start_ns = 0;
-            msg.msgtype = C2E;
-            break;
+            return 0;
         case TCP_SYN_SENT:
             return 0;
         case TCP_SYN_RECV:
             sockstate = try_tap(sk, false, true);
             if (sockstate != NULL) {
-                sockstate->start_ns = now;
-                sockstate->state = MON;
-                sockstate->mode = SERVER;
+                on_hss(ctx, sk, sockstate, now);
             }
             return 0;
-        case TCP_CLOSE:  // close
-        case TCP_FIN_WAIT1:  // proactive close
-        case TCP_CLOSE_WAIT:  // got fin from remote
-        case TCP_LAST_ACK:
-            if (sockstate == NULL) {
-                return 0;
-            }
-            msg.msgtype = CLS;
-            force_send = true;
-            sockstatemap.delete(&sk);
-            break;
         default:
-            if (sockstate == NULL) {
-                return 0;
+            if (sockstate != NULL) {
+                on_cls(ctx, sk, sockstate, now, state);
             }
-            msg.msgtype = X2X;
-            force_send = true;
-            // stop tracking as it is out of control
-            sockstatemap.delete(&sk);
-            break;
-    }
-    sockstate = NULL;
-    if (lat >= MIN_LAT_NS || force_send) {
-        // we fill in rest of the info here
-        fill_msg(sk, &msg);
-        msg.ts_ns = now;
-        msg.lat_ns = lat;
-        msg.state = state;
-        events.perf_submit(ctx, &msg, sizeof(msg));
+            return 0;
     }
     return 0;
 }
 
+/* checkpoint for WTS */
 int trace_tcp_sendmsg_locked(struct pt_regs *ctx, struct sock *sk, struct msghdr *msg, size_t size) {
     if (sk->__sk_common.skc_family != AF_INET) {
         return 0;
     }
     u64 now = bpf_ktime_get_ns();
-    u64 lat = 0;
     struct sock_state_t * sockstate = sockstatemap.lookup(&sk);
     if (sockstate == NULL) {
         sockstate = try_tap(sk, true, true);
@@ -345,21 +598,75 @@ int trace_tcp_sendmsg_locked(struct pt_regs *ctx, struct sock *sk, struct msghdr
             return 0;
         }
     }
-    if (sockstate->state != WRITING) {
-        enum state last_state = sockstate->state;
-        sockstate->state = WRITING;
-        sockstate->start_ns = now;
-        // TODO: for server, this need to add read to write msg
-    }
-    sockstate->latest_ns = now;
-    // struct write_state_t writestate = {sk, size};
-    // u64 pid_tgid = bpf_get_current_pid_tgid();
-    // u32 tid = pid_tgid;
-    // writestatemap.update(&tid, &writestate);
+    u64 pid_tgid = bpf_get_current_pid_tgid();
+    u32 tid = pid_tgid;
+    callmap.insert(&tid, &sk);
+    on_wts(ctx, sk, sockstate, now);
     return 0;
 }
 
-int trace_readable(struct pt_regs *ctx, struct sock *sk) {
+/* checkpoint for WTE */
+int trace_ret_tcp_sendmsg_locked(struct pt_regs *ctx) {
+    u64 now = bpf_ktime_get_ns();
+    u64 pid_tgid = bpf_get_current_pid_tgid();
+    u32 tid = pid_tgid;
+    struct sock **skp = callmap.lookup(&tid);
+    if (skp == NULL) {
+        return 0;
+    }
+    struct sock *sk = *skp;
+    callmap.delete(&tid);
+    int ret = PT_REGS_RC(ctx);
+    struct sock_state_t *sockstate = sockstatemap.lookup(&sk);
+    if (sockstate == NULL) {
+        return 0;  // apparantly we don't care anymore
+    }
+    on_wte(ctx, sk, sockstate, now, ret);
+    return 0;
+}
+
+/* checkpoint for RDS */
+int trace_tcp_recvmsg(struct pt_regs *ctx, struct sock *sk) {
+    if (sk->__sk_common.skc_family != AF_INET) {
+        return 0;
+    }
+    u64 now = bpf_ktime_get_ns();
+    struct sock_state_t * sockstate = sockstatemap.lookup(&sk);
+    if (sockstate == NULL) {
+        sockstate = try_tap(sk, true, true);
+        if (sockstate == NULL){
+            return 0;
+        }
+    }
+    u64 pid_tgid = bpf_get_current_pid_tgid();
+    u32 tid = pid_tgid;
+    callmap.insert(&tid, &sk);
+    on_rds(ctx, sk, sockstate, now);
+    return 0;
+}
+
+/* checkpoint for RDE */
+int trace_ret_tcp_recvmsg(struct pt_regs *ctx) {
+    u64 now = bpf_ktime_get_ns();
+    u64 pid_tgid = bpf_get_current_pid_tgid();
+    u32 tid = pid_tgid;
+    struct sock **skp = callmap.lookup(&tid);
+    if (skp == NULL) {
+        return 0;
+    }
+    struct sock *sk = *skp;
+    callmap.delete(&tid);
+    int ret = PT_REGS_RC(ctx);
+    struct sock_state_t *sockstate = sockstatemap.lookup(&sk);
+    if (sockstate == NULL) {
+        return 0;  // apparantly we don't care anymore
+    }
+    on_rde(ctx, sk, sockstate, now, ret);
+    return 0;
+}
+
+/* checkpoint for RDA */
+int trace_sock_def_readable(struct pt_regs *ctx, struct sock *sk) {
     if (sk->__sk_common.skc_family != AF_INET) {
         return 0;
     }
@@ -368,25 +675,30 @@ int trace_readable(struct pt_regs *ctx, struct sock *sk) {
     if (sockstate == NULL) {
         return 0; /* we don't try to tap here, it might tap closing socks */
     }
-    if (sockstate->readable_ns) {
-        return 0;  /* only need first */
+    on_rda(ctx, sk, sockstate, now);
+    return 0;
+}
+
+/* checkpoint for FAK */ 
+int trace_tcp_check_space(struct pt_regs *ctx, struct sock *sk) {
+    if (sk->__sk_common.skc_family != AF_INET) {
+        return 0;
     }
-    sockstate->readable_ns = now;
-    u64 lat = 0;
-    if (sockstate->start_ns) {
-        lat = now - sockstate->start_ns;
+    u64 now = bpf_ktime_get_ns();
+    struct sock_state_t * sockstate = sockstatemap.lookup(&sk);
+    if (sockstate == NULL) {
+        return 0;
     }
-    if (lat > 0 && lat >= MIN_LAT_NS && sockstate->mode == CLIENT) {
-        struct msg_t msg = {};
-        msg.ts_ns = now;
-        msg.msgtype = W2I;
-        msg.lat_ns = lat;
-        fill_msg(sk, &msg);
-        events.perf_submit(ctx, &msg, sizeof(msg));
+    struct tcp_sock *tp = tcp_sk(sk);
+
+    if (tp->snd_una >= tp->snd_nxt) {
+        on_fak(ctx, sk, sockstate, now);
     }
     return 0;
 }
 
+#if 0
+/* checkpoint for WTA */
 int trace_writable(struct pt_regs *ctx, struct sock *sk) {
     if (sk->__sk_common.skc_family != AF_INET) {
         return 0;
@@ -402,92 +714,38 @@ int trace_writable(struct pt_regs *ctx, struct sock *sk) {
     sockstate->writable_ns = now;
     return 0;
 }
-
-int trace_tcp_recvmsg(struct pt_regs *ctx, struct sock *sk) {
-    if (sk->__sk_common.skc_family != AF_INET) {
-        return 0;
-    }
-    u64 now = bpf_ktime_get_ns();
-    struct sock_state_t * sockstate = sockstatemap.lookup(&sk);
-    if (sockstate == NULL) {
-        sockstate = try_tap(sk, true, true);
-        if (sockstate == NULL){
-            return 0;
-        }
-    }
-    u64 lat = 0;
-    if (sockstate->readable_ns) {
-        lat = now - sockstate->readable_ns;
-        sockstate->readable_ns = 0;
-        if (lat >= MIN_LAT_NS) {
-            struct msg_t msg = {};
-            msg.ts_ns = now;
-            msg.msgtype = I2R;
-            msg.lat_ns = lat;
-            fill_msg(sk, &msg);
-            events.perf_submit(ctx, &msg, sizeof(msg));
-        }
-    }
-
-    if (sockstate->state != READING) {
-        enum state last_state = sockstate->state;
-        /*
-        if (sockstate->mode == CLIENT && last_state == WRITING)
-        {
-            lat = 0;
-            if (sockstate->startns) {
-                lat = now - sockstate->startns;
-            }
-            if (lat >= MIN_LAT_NS) {
-                struct msg_t msg = {};
-                msg.ts_ns = now;
-                msg.msgtype = W2R;
-                msg.lat_ns = lat;
-                fill_msg(sk, &msg);
-                events.perf_submit(ctx, &msg, sizeof(msg));
-            }
-        }
-        */
-        sockstate->state = READING;
-        sockstate->start_ns = now;
-    }
-    sockstate->latest_ns = now;
-    return 0;
-}
-
-
-/*
-int trace_ret_tcp_sendmsg_locked(struct pt_regs *ctx) {
-    u64 now = bpf_ktime_get_ns();
-    u64 pid_tgid = bpf_get_current_pid_tgid();
-    u32 tid = pid_tgid;
-    int ret = PT_REGS_RC(ctx);
-
-    struct write_state_t *writestate = writestatemap.lookup(&tid);
-    if (writestate == NULL) {
-        return 0;
-    }
-    struct sock *sk = writestate->sk;
-    size_t write_size = writestate->size;
-    writestatemap.delete(&tid);
-    struct sock_state_t *sockstate = sockstatemap.lookup(&writestate->sk);
-    if (sockstate == NULL) {
-        return 0;  // apparantly we don't care anymore
-    }
-    u64 lat = now - sockstate->start_ns;
-    if (write_size == ret) {
-
-    }
-}
-*/
+#endif
 """
 
+macros = {
+    "IS_SERVER_COND": "false",
+    "IS_CLIENT_COND": "false",
+    "MIN_LAT_NS": str(args.latms * 1000000) + 'ull',
+}
+
+if args.server:
+    if args.service_ip:
+        if args.service_ip.version != 4:
+            raise ValueError('service ip has to be ipv4, got %r' % args.service_ip)
+        macros["IS_SERVER_COND"] = "(lport == %d) && (saddr == %du)" % (args.service_port, struct.unpack("I", args.service_ip.packed)[0])
+    else:
+        macros["IS_SERVER_COND"] = "lport == %d" % args.service_port
+
+if args.client:
+    if args.service_ip:
+        if args.service_ip.version != 4:
+            raise ValueError('service ip has to be ipv4, got %r' % args.service_ip)
+        macros["IS_CLIENT_COND"] = "(dport == %d) && (daddr == %du)" % (args.service_port, struct.unpack("I", args.service_ip.packed)[0])
+    else:
+        macros["IS_CLIENT_COND"] = "dport == %d" % args.service_port
+
+macros_text = "\n".join("#define %s %s" % (k, v) for k, v in macros.items())
+bpf_text = macros_text + bpf_text
 
 if debug or args.ebpf:
     print(bpf_text)
     if args.ebpf:
         exit()
-
 
 
 # initialize BPF
@@ -508,14 +766,17 @@ def print_event(cpu, data, size, timefmt="%H:%M:%S.%f"):
     # print(data.msgtype, data.ts_ns)
     event = b["events"].event(data)
     # time, type, pid, comm, src, dest, state, lat
-    print("%s %3s %15s:%-5d %15s:%-5d %12s|%-12s %8.3f" % (
+    print("%s %7s %15s:%-5d %15s:%-5d %9d/%-3d %8.3f" % (
         # strftime(timefmt, localtime(clocktime(event.ts_ns))),
         datetime.datetime.fromtimestamp(clocktime(event.ts_ns)).strftime(timefmt),
         MSG_TYPES[event.msgtype],
         # event.pid, event.comm.decode(), "%9d %16s" TODO: pid
-        ip_address(event.saddr), event.lport,
-        ip_address(event.daddr), event.dport,
-        TCP_STATES[event.last_state], TCP_STATES[event.state],
+        ip_address(struct.pack("I", event.saddr)), event.lport,
+        ip_address(struct.pack("I", event.daddr)), event.dport,
+        # ip_address(event.saddr), event.lport,
+        # ip_address(event.daddr), event.dport,
+        event.bytes, event.calls,
+        # TCP_STATES[event.last_state], TCP_STATES[event.state],
         1e-6*event.lat_ns,
     ))
     # print("%12s|%-12s" % (TCP_STATES[event.last_state], TCP_STATES[event.state]))
@@ -525,11 +786,19 @@ def print_event(cpu, data, size, timefmt="%H:%M:%S.%f"):
 b.attach_kprobe(event="tcp_connect", fn_name="trace_tcp_connect")
 b.attach_kprobe(event="tcp_set_state", fn_name="trace_tcp_set_state")
 b.attach_kprobe(event="tcp_sendmsg_locked", fn_name="trace_tcp_sendmsg_locked")
-b.attach_kprobe(event="sock_def_readable", fn_name="trace_readable")
-b.attach_kprobe(event="sk_stream_write_space", fn_name="trace_writable")
+b.attach_kretprobe(event="tcp_sendmsg_locked", fn_name="trace_ret_tcp_sendmsg_locked")
 b.attach_kprobe(event="tcp_recvmsg", fn_name="trace_tcp_recvmsg")
+b.attach_kretprobe(event="tcp_recvmsg", fn_name="trace_ret_tcp_recvmsg")
+b.attach_kprobe(event="sock_def_readable", fn_name="trace_sock_def_readable")
+b.attach_kprobe(event="tcp_check_space", fn_name="trace_tcp_check_space")
+# b.attach_kprobe(event="sk_stream_write_space", fn_name="trace_writable")
 # read events
 b["events"].open_perf_buffer(print_event, page_cnt=64)
+print("%15s %7s %15s:%-5s %15s:%-5s %9s/%-3s %13s" % (
+    "TIMESTAMP", "MSGTYPE",
+    "SADDR", "LPORT", "DADDR", "DPORT",
+    "BYTES", "CNT", "LATENCY(ms)"
+))
 while 1:
     try:
         b.perf_buffer_poll()
