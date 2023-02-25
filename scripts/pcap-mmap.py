@@ -4,7 +4,9 @@
 This example only works on Linux
 
 see https://docs.kernel.org/networking/packet_mmap.html
-also thanks Suraj Signh for the nice pcap file tutorial: https://www.bitforestinfo.com/blog/01/13/save-python-raw-tcpip-packet-into-pcap-files.html
+also thanks Suraj Signh for the nice pcap file tutorial:
+https://www.bitforestinfo.com/blog/01/13/save-python-raw-tcpip-packet-into-pcap-files.html
+
 https://www.kernel.org/doc/html/latest/networking/filter.html
 
 See netsniff-ng (http://netsniff-ng.org/) and libpcap for in prduction
@@ -126,7 +128,7 @@ def main():
                    flags=mmap.MAP_SHARED | MAP_LOCKED)
 
     with open('mymmap.pcap', 'wb') as f:
-        pcap_write_header(f)
+        pcap_write_header(f, thiszone = time.timezone)
         for hdr in iter_frame(mm, tp_frame_size, tp_frame_nr):
             while hdr.tp_status == 0:
                 # consider to use poll
