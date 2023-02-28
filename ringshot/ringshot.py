@@ -197,7 +197,7 @@ class Loop():
         self.shot_sink.consume_shot(self.ring)
         infno = self.inf.fileno()
         outfno = self.outf.fileno()
-        logger.debug('inf: %s outf: %s', infno, outfno)
+        # logger.debug('inf: %s outf: %s', infno, outfno)
         # we try to use sendfile for efficiency
         # if not self.inputs:  # makes sure our inputs are not already backed up
         #     while True:
@@ -215,17 +215,24 @@ class Loop():
             except BlockingIOError:  # there, no more input
                 break
 
+        self.ep.register(outfno, select.POLLOUT)
+
     def on_outf(self):
         # we play nicly on outf, as timing of it is low priority, don't want it
         # to block
         logger.debug('writing output')
+        outfno = self.outf.fileno()
         while self.inputs:
             data = self.inputs.pop(0)
             try:
-                self.outf.write(data)
+                # self.outf.write(data)
+                os.write(outfno, data)
             except BlockingIOError:
                 # we put it back :(
                 self.inputs.insert(0, data)
+
+        if not self.inputs:
+            self.ep.unregister(outfno)
 
     def run(self):
         infno = self.inf.fileno()
@@ -247,19 +254,23 @@ class Loop():
                 self.on_inf()
                 # ep.modify(infno, inf_events)
                 continue
-            elif painfno in filenos:
-                filenos.remove(painfno)
-                self.on_painf()
-                # we ration rapid painf maintenance
             elif outfno in filenos:
                 filenos.remove(outfno)
                 self.on_outf()
                 continue
+            elif painfno in filenos:
+                filenos.remove(painfno)
+                self.on_painf()
+                # we ration rapid painf maintenance
 
             dt = before_timer - time.monotonic()
             if dt < self.cadance:
                 time.sleep(self.cadance - dt)
 
+        logger.info('subproc exited with %d', self.subproc.returncode)
+        while(self.inputs):
+            self.on_outf()
+            time.sleep(self.cadance)
         return self.subproc.returncode
 
     def close(self):
@@ -380,10 +391,6 @@ class Ring(object):
     @property
     def gapped(self):
         return self._gapped
-
-    # def get_block(self, blkid):
-    #     assert 0 <= blkid < self.blocks
-    #     return self.mm[blkid*self.block_size:blkid*self.block_size + self.block_size]
 
     def get_bd(self, blkid):
         assert 0 <= blkid < self.blocks, 'got blkid %d' % blkid
