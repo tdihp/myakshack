@@ -270,8 +270,7 @@ int trace_pipe_write(
     }
 
     /* we do some simple iov verification to make sure it is our write call */
-    if (from->iter_type != ITER_IOVEC || from->nr_segs != 1 ||
-        from->iov_offset != 0 || from->iov == NULL) {
+    if (from->nr_segs != 1 || from->iov_offset != 0 || from->iov == NULL) {
         return 0;
     }
 
