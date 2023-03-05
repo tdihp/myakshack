@@ -1,3 +1,40 @@
+#!/usr/bin/python
+# -*- coding: utf-8 -*-
+
+"""
+cnisnoop
+========
+
+snooping [CNI](https://github.com/containernetworking/cni) calls using bcc/bpf
+on Linux.
+
+Quick Start
+-----------
+
+Works after installing Python3 and [bcc](https://github.com/iovisor/bcc) on a
+relatively modern Linux (tested on 5.15).
+
+Simply run:
+
+    python3 cnisnoop.py
+
+How it works
+------------
+
+1. It traces execve syscalls on process that has both stdin and stdout
+   configured as pipe. This is based on the assumption that CNI executes plugin
+   binaries, and uses stdin/stdout for transmitting data.
+2. It traces pipe write calls.
+3. It traces process exits.
+
+Copyright (c) 2023, Ping He.
+License: MIT
+"""
+
+__author__  = "Ping He"
+__license__ = "MIT"
+
+
 import bcc
 from bcc import BPF
 from bcc.containers import filter_by_containers
@@ -11,13 +48,15 @@ import datetime
 import pprint
 
 
+DEBUG = 0
+COMMON_LINE = '%(timestamp)s %(pid)7s %(cni_pid)7s %(comm)16s %(event_name)6s'
+ENCODING = 'utf8'
 DEF_DEFAULTS = {
     "MAX_EVENT_SIZE":   4096,
     "MAX_EVENTS":       64,
     "LOOP_MAX":         32,     # max loop count
-    "EXEC_STR_BITS":    7,      # 7 bits means highest value is 0b1111111
+    "EXEC_STR_BITS":    8,      # 7 bits means highest value is 0b1111111
 }
-
 EVENT_TYPES = [
     None,
     "EVENT_EXEC",
@@ -26,7 +65,6 @@ EVENT_TYPES = [
     "EVENT_EXIT",
     "EVENT_TRACE",
 ]
-
 EVENT_NAMES = [
     '',
     'EXEC',
@@ -35,7 +73,6 @@ EVENT_NAMES = [
     'EXIT',
     'TRACE',
 ]
-
 DEF_BUILTINS = dict((k, i) for i, k in enumerate(EVENT_TYPES) if k)
 
 
@@ -115,19 +152,6 @@ static inline struct file *compat_fget(struct files_struct *files, unsigned int 
     /* I have no idea but this is the way to go, not fdt->fd[fd] */
     return *(fdt->fd + fd);
 }
-
-/*
-static inline void dbg(u32 v1, u32 v2, u64 v3) {
-    struct msghdr_t hdr = {};
-    hdr.type = EVENT_TRACE;
-    hdr.pid = v1;
-    hdr.cni_pid = v2;
-    hdr.timestamp_ns = v3;
-    hdr.size = sizeof(hdr);
-    bpf_get_current_comm(&hdr.comm, sizeof(hdr.comm));
-    buffer.ringbuf_output(&hdr, sizeof(hdr), BPF_RB_FORCE_WAKEUP);
-}
-*/
 
 static inline int on_execve(
     struct pt_regs *ctx,
@@ -356,82 +380,7 @@ int on_sched_exit(struct tracepoint__sched__sched_process_exit *args) {
     buffer.ringbuf_output(&hdr, sizeof(hdr), 0);
     return 0;
 }
-
-
 """
-
-defs = DEF_BUILTINS.copy()
-defs.update(DEF_DEFAULTS)
-def_text = "\n".join("#define %s %s" % pair for pair in defs.items())
-bpf_text = def_text + '\n' + bpf_text
-
-b = BPF(text=bpf_text, debug=bcc.DEBUG_BTF|bcc.DEBUG_BPF|bcc.DEBUG_SOURCE)
-first_ts = BPF.monotonic_time()
-first_ts_real = time.time()
-# b = BPF(text=bpf_text, debug=0xff)
-execve_fnname = b.get_syscall_fnname("execve")
-b.attach_kprobe(event=execve_fnname, fn_name="syscall__execve")
-b.attach_kprobe(event='pipe_write', fn_name="trace_pipe_write")
-b.attach_kretprobe(event='pipe_write', fn_name="trace_ret_pipe_write", maxactive=4096)
-b.attach_tracepoint(tp='sched:sched_process_exit', fn_name='on_sched_exit')
-
-
-def reltime(ts_ns):
-    return 1e-9 * (ts_ns - first_ts)
-
-
-def clocktime(ts_ns):
-    return reltime(ts_ns) + first_ts_real
-
-
-COMMON_LINE = '%(timestamp)s %(pid)7s %(cni_pid)7s %(comm)16s %(event_name)6s'
-ENCODING = 'utf8'
-
-def callback(ctx, data, size):
-    print('=' * 80)
-    event = b['buffer'].event(data)
-    event_name = EVENT_NAMES[event.type]
-    event_type = EVENT_TYPES[event.type]
-    pid = event.pid
-    cni_pid = event.cni_pid
-    comm = event.comm.decode(ENCODING)
-    timestamp = datetime.datetime.fromtimestamp(clocktime(event.timestamp_ns)).strftime('%H:%M:%S.%f')
-    print(COMMON_LINE % locals())
-    if event_type == 'EVENT_EXIT':
-        exit_code = event.exit_code
-        print("exit code: %d" % exit_code)
-    else:
-        payload_size = event.ex.payload_size
-        offset = ct.sizeof(msghdr_t)
-        payload = bytes(ct.cast(ct.byref(event, offset), ct.POINTER(ct.c_uint8 * payload_size)).contents)
-        if event_type == 'EVENT_EXEC':
-            nenvs = event.ex.envs
-            nargs = event.ex.args
-            strlist = payload.split(b'\0')
-            fname = b'?'
-            envs = [b'?%d=?' % i for i in range(nenvs)]
-            args = [b'?%d' % i for i in range(nargs)]
-            if strlist:
-                fname = strlist.pop(0)
-            if strlist:
-                envs_found = strlist[:nenvs]
-                envs[:len(envs_found)] = envs_found
-                strlist[:nenvs] = []
-            if strlist:
-                args_found = strlist[:nargs]
-                args[:len(args_found)] = args_found
-                strlist[:nargs] = []
-            args = [arg.decode(ENCODING) for arg in args]
-            envs = dict(env.decode(ENCODING).split('=', 1) for env in envs)
-            print('exe: %s %s' % (fname.decode(ENCODING), ' '.join(args)))
-            print('envs:')
-            pprint.pprint(envs)
-        else:
-            print('payload:')
-            print(payload.decode(ENCODING))
-            # if event.padding:
-            #     d = ct.cast(ct.byref(event, ct.sizeof(msghdr_t)), ct.POINTER(ct.c_char * event.padding))
-            
 
 
 class ex_t(ct.Structure):
@@ -458,12 +407,97 @@ class msghdr_t(ct.Structure):
     ]
     _anonymous_ = ['u']
 
-# loop with callback to print_event
-b["buffer"].open_ring_buffer(callback)
-b["buffer"]._event_class = msghdr_t
-while 1:
-    try:
-        # print('fooooo')
-        b.ring_buffer_poll()
-    except KeyboardInterrupt:
-        exit()
+
+class Loop(object):
+    def __init__(self):
+        defs = DEF_BUILTINS.copy()
+        defs.update(DEF_DEFAULTS)
+        def_text = "\n".join("#define %s %s" % pair for pair in defs.items())
+        src = def_text + '\n' + bpf_text
+        dbg = 0
+        if DEBUG:
+            dbg=bcc.DEBUG_BTF|bcc.DEBUG_BPF|bcc.DEBUG_SOURCE
+
+        self.b = BPF(text=src, debug=dbg)
+        self.first_ts = BPF.monotonic_time()
+        self.first_ts_real = time.time()
+        execve_fnname = self.b.get_syscall_fnname("execve")
+        self.b.attach_kprobe(event=execve_fnname, fn_name="syscall__execve")
+        self.b.attach_kprobe(event='pipe_write', fn_name="trace_pipe_write")
+        self.b.attach_kretprobe(event='pipe_write', fn_name="trace_ret_pipe_write", maxactive=4096)
+        self.b.attach_tracepoint(tp='sched:sched_process_exit', fn_name='on_sched_exit')
+
+    def reltime(self, ts_ns):
+        return 1e-9 * (ts_ns - self.first_ts)
+
+    def clocktime(self, ts_ns):
+        return self.reltime(ts_ns) + self.first_ts_real
+
+    def get_timestamp(self, ts_ns):
+        return datetime.datetime.fromtimestamp(self.clocktime(ts_ns)).strftime('%H:%M:%S.%f')
+
+    def callback(self, ctx, data, size):
+        print('=' * 80)
+        event = self.b['buffer'].event(data)
+        event_name = EVENT_NAMES[event.type]
+        event_type = EVENT_TYPES[event.type]
+        pid = event.pid
+        cni_pid = event.cni_pid
+        comm = event.comm.decode(ENCODING)
+        timestamp = self.get_timestamp(event.timestamp_ns)
+        print(COMMON_LINE % locals())
+        if event_type == 'EVENT_EXIT':
+            exit_code = event.exit_code
+            print("exit code: %d" % exit_code)
+        else:
+            payload_size = event.ex.payload_size
+            offset = ct.sizeof(msghdr_t)
+            payload = bytes(ct.cast(ct.byref(event, offset), ct.POINTER(ct.c_uint8 * payload_size)).contents)
+            if event_type == 'EVENT_EXEC':
+                nenvs = event.ex.envs
+                nargs = event.ex.args
+                strlist = payload.split(b'\0')
+                fname = b'?'
+                envs = [b'?%d=?' % i for i in range(nenvs)]
+                args = [b'?%d' % i for i in range(nargs)]
+                if strlist:
+                    fname = strlist.pop(0)
+                if strlist:
+                    envs_found = strlist[:nenvs]
+                    envs[:len(envs_found)] = envs_found
+                    strlist[:nenvs] = []
+                if strlist:
+                    args_found = strlist[:nargs]
+                    args[:len(args_found)] = args_found
+                    strlist[:nargs] = []
+                args = [arg.decode(ENCODING) for arg in args]
+                envs = dict(env.decode(ENCODING).split('=', 1) for env in envs)
+                print('exe: %s %s' % (fname.decode(ENCODING), ' '.join(args)))
+                print('envs:')
+                pprint.pprint(envs)
+            else:
+                print(payload.decode(ENCODING))
+
+    def run(self):
+        # loop with callback to print_event
+        self.b["buffer"].open_ring_buffer(self.callback)
+        self.b["buffer"]._event_class = msghdr_t
+        print('cnisnoop started')
+        while 1:
+            try:
+                self.b.ring_buffer_poll()
+            except KeyboardInterrupt:
+                exit()
+
+
+def main():
+    import argparse
+    parser = argparse.ArgumentParser(
+        description=__doc__,
+        formatter_class=argparse.RawDescriptionHelpFormatter)
+    args = parser.parse_args()
+    Loop().run()
+
+
+if __name__ == '__main__':
+    main()
