@@ -49,7 +49,8 @@ import pprint
 
 
 DEBUG = 0
-COMMON_LINE = '%(timestamp)s %(pid)7s %(cni_pid)7s %(comm)16s %(event_name)6s'
+COMMON_LINE = '%(timestamp)s %(tgid)7s/%(pid)-7s %(cni_tgid)7s %(comm)16s %(event_name)6s'
+HEADER_LINE = 'HH:MM:SS.0000NS     PID/TID     CNI_PID             COMM  EVENT'
 ENCODING = 'utf8'
 DEF_DEFAULTS = {
     "MAX_EVENT_SIZE":   4096,
@@ -94,8 +95,13 @@ bpf_text = r"""
 struct msghdr_t {
     u64 timestamp_ns;
     u32 type;
+    u32 tgid;
     u32 pid;        /* pid of the current process */
-    u32 cni_pid;   /* pid of the cni, for caller, tracked by inode */
+    u32 cni_tgid;   /* pid of the cni, for caller, tracked by inode */
+    union {  /*comm gives sufficient space for additional info in write probe */
+        char comm[TASK_COMM_LEN];
+        const char __user *usrbuf;
+    };
     union {
         struct {
             u16 payload_size;
@@ -103,10 +109,6 @@ struct msghdr_t {
             u8 args;
         } ex;  /*extra detail*/
         int exit_code;
-    };
-    union {  /*comm gives sufficient space for additional info in write probe */
-        char comm[TASK_COMM_LEN];
-        const char __user *usrbuf;
     };
 };
 
@@ -173,6 +175,9 @@ static inline int on_execve(
     u32 u32zero = 0;
     bool positive = false;
 
+    u32 tgid = pidtgid >> 32;
+    /* TODO: we should safely assert tgid == pid */
+    
     /* Step 1 */
     if (!task->files) {
         return 0;
@@ -240,8 +245,9 @@ static inline int on_execve(
     /* Step 5 */
     hdr->timestamp_ns = now;
     hdr->type = EVENT_EXEC;
-    hdr->pid = task->parent->pid;  /*we use parent pid here*/
-    hdr->cni_pid = pidtgid;
+    hdr->tgid = task->parent->tgid; /*we use parent tgid/pid here*/
+    hdr->pid = task->parent->pid;
+    hdr->cni_tgid = tgid;
     bpf_get_current_comm(&hdr->comm, sizeof(hdr->comm));
     u32 msgsize = payload_p - ((u8 *) buf->payload);
     if (msgsize > BUFFER_SIZE) {
@@ -256,10 +262,9 @@ static inline int on_execve(
     struct pid_inode_t inodes;
     inodes.ino0 = file0->f_inode->i_ino;
     inodes.ino1 = file1->f_inode->i_ino;
-    pid_inode_map.insert(&hdr->cni_pid, &inodes);
-    inode_map.insert(&inodes.ino0, &hdr->cni_pid);
+    pid_inode_map.insert(&tgid, &inodes);
+    inode_map.insert(&inodes.ino0, &tgid);
     inode_map.insert(&inodes.ino1, &u32zero);
-    // dbg(inodes.ino0, inodes.ino1, 0);
     return 0;
 };
 
@@ -288,8 +293,8 @@ int trace_pipe_write(
         return 0;
     }
 
-    u32 *cni_pid_p = inode_map.lookup(&ino);
-    if (cni_pid_p == NULL) {
+    u32 *cni_tgid_p = inode_map.lookup(&ino);
+    if (cni_tgid_p == NULL) {
         return 0;
     }
 
@@ -307,12 +312,13 @@ int trace_pipe_write(
     struct msghdr_t hdr = {};
     hdr.timestamp_ns = now;
     hdr.type = EVENT_STDIN;
-    hdr.pid = pidtgid;
-    hdr.cni_pid = *cni_pid_p;
+    hdr.tgid = pidtgid >> 32;
+    hdr.pid = pidtgid & 0xffffffff;
+    hdr.cni_tgid = *cni_tgid_p;
     hdr.ex.payload_size = from->count;  /* we are assuming count < 16bit*/
     hdr.usrbuf = usrbuf;
-    if (hdr.cni_pid == 0) {
-        hdr.cni_pid = pidtgid;
+    if (hdr.cni_tgid == 0) {
+        hdr.cni_tgid = hdr.tgid;
         hdr.type = EVENT_STDOUT;
     }
     pipe_write_map.insert(&hdr.pid, &hdr);
@@ -373,8 +379,9 @@ int on_sched_exit(struct tracepoint__sched__sched_process_exit *args) {
     struct msghdr_t hdr = {};
     hdr.timestamp_ns = now;
     hdr.type = EVENT_EXIT;
+    hdr.tgid = pid;
     hdr.pid = pid;
-    hdr.cni_pid = pid;
+    hdr.cni_tgid = pid;
     hdr.exit_code = task->exit_code;
     __builtin_memcpy(&hdr.comm, &args->comm, sizeof(args->comm));
     buffer.ringbuf_output(&hdr, sizeof(hdr), 0);
@@ -400,10 +407,11 @@ class msghdr_t(ct.Structure):
     _fields_ = [
         ('timestamp_ns',    ct.c_uint64),
         ('type',            ct.c_uint32),
+        ('tgid',            ct.c_uint32),
         ('pid',             ct.c_uint32),
-        ('cni_pid',         ct.c_uint32),
-        ('u',               _U),
+        ('cni_tgid',        ct.c_uint32),
         ('comm',            ct.c_char * 16),
+        ('u',               _U),
     ]
     _anonymous_ = ['u']
 
@@ -441,8 +449,9 @@ class Loop(object):
         event = self.b['buffer'].event(data)
         event_name = EVENT_NAMES[event.type]
         event_type = EVENT_TYPES[event.type]
+        tgid = event.tgid
         pid = event.pid
-        cni_pid = event.cni_pid
+        cni_tgid = event.cni_tgid
         comm = event.comm.decode(ENCODING)
         timestamp = self.get_timestamp(event.timestamp_ns)
         print(COMMON_LINE % locals())
@@ -482,7 +491,7 @@ class Loop(object):
         # loop with callback to print_event
         self.b["buffer"].open_ring_buffer(self.callback)
         self.b["buffer"]._event_class = msghdr_t
-        print('cnisnoop started')
+        print(HEADER_LINE)
         while 1:
             try:
                 self.b.ring_buffer_poll()
