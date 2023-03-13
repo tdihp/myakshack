@@ -69,19 +69,55 @@ Where:
   reads CNI configuration and executes plugins binaries with appropriate
   parameters.
 
-So, to check what CNI plugins has been applied, either tune the container
-runtime to log such information, or alternatively use any OS features that can
-trace exec calls. strace is a good choice given the requirement. e.g.:
+### Observe CNI calls by Containerd debug logs
+
+Containerd currently prints CNI outcome when started with
+`containerd --log-level debug`. If systemd is used, locate the containerd
+service by `find /etc/systemd -name 'containerd.service'`, modify `Service.ExecStart`
+to include the debug flag, then reload:
+`systemctl daemon-reload && systemctl restart containerd`. CNI logs (among
+other debug information) should show in containerd logs.
+
+Alternatively, add `[debug]` section with `level="debug"`.
+
+### Observe CNI calls by strace
+
+Debug logs of containerd may disrupt runtime settings and show too much detail,
+which is less than desirable. Alternatively, any OS level tracing mechanism can
+be used, as long as it can capture the execution protocol that CNI uses.
+Basically it needs to:
+
+1. Capture exec calls and filter out calls that matches CNI charastics;
+2. Capture stdin, stdout of the created process.
+3. exit code of the created process. 
+
+strace can be used to capture the exec call, however it will be difficult to not
+over-capturing. An example of strace based capture that only includes limited
+information:
 
 ```shell
-strace -fvtt -s 2000 -b execve -e trace=execve -p $(pgrep -x containerd) 2>&1 | grep CNI_COMMAND
+strace -fvtt -s900 -bexecve -etrace=execve -p$(pgrep -x containerd) 2>&1 | grep CNI_COMMAND
 ```
 
 The command assumes containerd is the container runtime, it searches for
-`CNI_COMMAND` which is a required env variable for a plugin execution.
+`CNI_COMMAND` which is a required env variable for a plugin execution. Noting
+this command only satisfies the 1st requirement.
+
+### Observe CNI calls with bpf
+
+Observing CNI calls with ebpf + kprobe is apparently possible. See
+[cnisnoop.py](../tracing/cnisnoop.py) which prints CNI calls as they occur.
+
+### Review CNI cached results
+
+[libcni](https://github.com/containernetworking/cni/tree/main/libcni),
+the reference implementation of CNI workflow which is used by container
+runtimes, stores cached results of CNI calls in `/var/lib/cni/results`.
+
+### Observe underlying Linux networking changes
 
 To check what's applied to Linux networking, Different tools can be used to
-identify activities in the corresponding field.
+identify activities in the corresponding fields.
 
 To give a few examples:
 
