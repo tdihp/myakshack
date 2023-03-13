@@ -51,8 +51,8 @@ CNI plugins basically works as below diagram:
 flowchart LR
 
 Kubelet -->|GRPC| CRT[Container Runtime]
+CRT --> netns[ip netns]
 CRT -->|exec| CNI[CNI Plugin]
-CNI --> netns[ip netns]
 CNI --> ipt[iptables/nft]
 CNI --> route[ip route]
 CNI --> arp
