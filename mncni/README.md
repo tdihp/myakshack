@@ -127,6 +127,50 @@ To give a few examples:
 * [xtables-monitor](https://man7.org/linux/man-pages/man8/xtables-monitor.8.html)
   for tracing iptables changes (only for nft, not legacy).
 
+## Toy CNI extension: lat
+
+Now we can see what's run by CNI, it is a good time to see a real-world example
+of CNI extension, to better understand how CNI works.
+
+### How does lat work
+
+[lat](./lat) works by:
+
+1. Reading pod annotations, this is allowed by CNI capability
+   `io.kubernetes.cri.pod-annotations`
+   [provided by containerd](https://github.com/containerd/containerd/pull/5026).
+2. bash scripting that implements lat to conform CNI specification.
+3. [jq](https://github.com/stedolan/jq) for parsing JSON in bash.
+4. `tc` with qdisc
+   [netem](https://man7.org/linux/man-pages/man8/tc-netem.8.html) for simulating
+   latency on nic.
+
+This example focuses on developing a minimal working CNI extension to illustrate
+how a CNI extension works, and how it fits in the big picture.
+
+### Install on top of Flannel
+
+To install on top of already working Flannel:
+
+```shell
+kubectl create cm -n kube-flannel lat --from-file=lat=lat/lat
+kubectl patch cm -n kube-flannel kube-flannel-cfg --patch-file lat/lat.cm.patch.yaml
+kubectl patch ds -n kube-flannel kube-flannel-ds --patch-file lat/lat.ds.patch.yaml
+```
+
+### Verify extension working
+
+To have a test deployment:
+
+```shell
+kubectl apply -f lat/latpod.yaml
+```
+
+This deployment configures all its pods to have 50ms latency when sending
+any outbound IP packets by having `lat: 50ms` in pod's annotation.
+
+To confirm latency is added, use `curl -v --trace-time http://<cluster-ip>` on
+Kubernetes node to confirm latency is more than 50ms.
 
 ## naivebridge
 
