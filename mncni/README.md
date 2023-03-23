@@ -129,12 +129,14 @@ To give a few examples:
 
 ## Toy CNI extension: lat
 
-Now we can see what's run by CNI, it is a good time to see a real-world example
-of CNI extension, to better understand how CNI works.
+Now we can see what's run by CNI, it is time to see a real-world example of CNI
+extension, to better understand how CNI works, and how it fits in the big
+picture. [lat](./lat) is a minimal (~50 lines of bash) yet functioning CNI
+extension for introducing network latency.
 
 ### How does lat work
 
-[lat](./lat) works by:
+lat works by:
 
 1. Reading pod annotations, this is allowed by CNI capability
    `io.kubernetes.cri.pod-annotations`
@@ -144,9 +146,6 @@ of CNI extension, to better understand how CNI works.
 4. `tc` with qdisc
    [netem](https://man7.org/linux/man-pages/man8/tc-netem.8.html) for simulating
    latency on nic.
-
-This example focuses on developing a minimal working CNI extension to illustrate
-how a CNI extension works, and how it fits in the big picture.
 
 ### Install on top of Flannel
 
