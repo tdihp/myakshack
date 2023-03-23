@@ -37,15 +37,13 @@ __license__ = "MIT"
 
 import bcc
 from bcc import BPF
-from bcc.containers import filter_by_containers
-from bcc.utils import ArgString, printb
-import bcc.utils as utils
-from collections import defaultdict
-from time import strftime
+from collections import namedtuple
 import ctypes as ct
 import time
 import datetime
 import pprint
+import shlex
+from textwrap import TextWrapper
 
 
 DEBUG = 0
@@ -416,8 +414,19 @@ class msghdr_t(ct.Structure):
     _anonymous_ = ['u']
 
 
+class CNICall(namedtuple('CNICall', ['args', 'envs', 'stdin'])):
+    """A CNI call info tracker for replay"""
+
+    def replay_shell(self):
+        """get a shell script line for replaying the same run"""
+        command = shlex.join(['echo', '-n', self.stdin]) + ' | ' + shlex.join(self.args)
+        return shlex.join(['env', '-i'] + self.envs + ['sh', '-c', command])
+
+
 class Loop(object):
-    def __init__(self):
+    def __init__(self, replay):
+        self.replay = replay
+        self.ongoing = {}  # we keep track of ongoing calls to print replay
         defs = DEF_BUILTINS.copy()
         defs.update(DEF_DEFAULTS)
         def_text = "\n".join("#define %s %s" % pair for pair in defs.items())
@@ -444,6 +453,14 @@ class Loop(object):
     def get_timestamp(self, ts_ns):
         return datetime.datetime.fromtimestamp(self.clocktime(ts_ns)).strftime('%H:%M:%S.%f')
 
+    def should_print_replay(self, exit_code):
+        if self.replay == 'always':
+            return True
+        elif self.replay == 'error' and exit_code != 0:
+            return True
+        else:
+            return False
+
     def callback(self, ctx, data, size):
         print('=' * 80)
         event = self.b['buffer'].event(data)
@@ -457,7 +474,11 @@ class Loop(object):
         print(COMMON_LINE % locals())
         if event_type == 'EVENT_EXIT':
             exit_code = event.exit_code
+            cnicall = self.ongoing.pop(cni_tgid, None)
             print("exit code: %d" % exit_code)
+            if cnicall and self.should_print_replay(exit_code):
+                print('replay:')
+                print('    ' + cnicall.replay_shell())
         else:
             payload_size = event.ex.payload_size
             offset = ct.sizeof(msghdr_t)
@@ -480,12 +501,19 @@ class Loop(object):
                     args[:len(args_found)] = args_found
                     strlist[:nargs] = []
                 args = [arg.decode(ENCODING) for arg in args]
-                envs = dict(env.decode(ENCODING).split('=', 1) for env in envs)
+                envs = [env.decode(ENCODING) for env in envs]
                 print('exe: %s %s' % (fname.decode(ENCODING), ' '.join(args)))
                 print('envs:')
-                pprint.pprint(envs)
+                for env in envs:
+                    print('    ' + env)
+                self.ongoing[cni_tgid] = CNICall(args=args, envs=envs, stdin='')
             else:
-                print(payload.decode(ENCODING))
+                payload = payload.decode(ENCODING)
+                print(payload)
+                if event_type == 'EVENT_STDIN' and cni_tgid in self.ongoing:
+                    cnicall = self.ongoing[cni_tgid]
+                    self.ongoing[cni_tgid] = cnicall._replace(
+                        stdin=cnicall.stdin + payload)
 
     def run(self):
         # loop with callback to print_event
@@ -504,8 +532,16 @@ def main():
     parser = argparse.ArgumentParser(
         description=__doc__,
         formatter_class=argparse.RawDescriptionHelpFormatter)
+    parser.set_defaults(replay='error')
+    rgroup = parser.add_mutually_exclusive_group()  # a group for replay
+    rgroup.add_argument('--no-replay',
+                        action='store_const', dest='replay', const='never',
+                        help='disable printing of replay command')
+    rgroup.add_argument('--always-replay',
+                        action='store_const', dest='replay', const='always',
+                        help='printing replay even if no error')
     args = parser.parse_args()
-    Loop().run()
+    Loop(replay=args.replay).run()
 
 
 if __name__ == '__main__':
