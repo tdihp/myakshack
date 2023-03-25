@@ -57,6 +57,8 @@ CNI --> ipt[iptables/nft]
 CNI --> route[ip route]
 CNI --> arp
 CNI --> link[ip link]
+CNI --> bridge
+CNI --> tc
 CNI --> ...
 ```
 
@@ -127,12 +129,12 @@ To give a few examples:
 * [xtables-monitor](https://man7.org/linux/man-pages/man8/xtables-monitor.8.html)
   for tracing iptables changes (only for nft, not legacy).
 
-## Toy CNI extension: lat
+## Toy CNI plugin: lat
 
 Now we can see what's run by CNI, it is time to see a real-world example of CNI
-extension, to better understand how CNI works, and how it fits in the big
-picture. [lat](./lat) is a minimal (~50 lines of bash) yet functioning CNI
-extension for introducing network latency.
+plugin, to better understand how CNI works, and how it fits in the big picture.
+[lat](./lat) is a minimal (~50 lines of bash) yet functioning CNI plugin for
+introducing network latency.
 
 ### How does lat work
 
