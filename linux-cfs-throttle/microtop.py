@@ -24,11 +24,13 @@ License: MIT
 import time
 import datetime
 import argparse
+import sys
 from pathlib import Path
 from functools import partial
 import threading
 from bcc import BPF
 from fractions import Fraction
+import traceback
 
 MSGTYPE = ['', 'ACCOUNT', 'RETURN']
 CGROUP_PATH='/sys/fs/cgroup/cpu,cpuacct/kubepods'
@@ -236,14 +238,6 @@ static inline int account(struct pt_regs *ctx,
 RAW_TRACEPOINT_PROBE(sched_stat_runtime) {
     struct task_struct *p = (struct task_struct *)ctx->args[0];
     struct task_group *tg = p->sched_task_group;
-// int kprobe____account_cfs_rq_runtime(struct pt_regs *ctx, struct cfs_rq *cfs_rq, u64 delta_exec) {
-//     if (!cfs_rq->runtime_enabled) {
-//         return 0;
-//     }
-//     if (!delta_exec) {
-//         return 0;
-//     }
-//     struct task_group *tg = cfs_rq->tg;
     u32 cgroup_ino = tg->css.cgroup->kn->id.ino;
     if (!filter_cgroup(cgroup_ino)) {
         return 0;
@@ -282,7 +276,7 @@ RAW_TRACEPOINT_PROBE(sched_stat_runtime) {
         bpf_probe_read_kernel_str(&stats->comm, sizeof(stats->comm), &p->comm);
     }
     stats->total_runtime += delta_exec;
-    // stats->runtime_count++;
+    stats->runtime_count++;
 }
 '''
 
@@ -344,11 +338,12 @@ src = header + '\n'.join(extra_macros) + bpf_text
 if args.bpf:
     print(src)
 b = BPF(text=src)
+first_ts = BPF.monotonic_time()
+first_ts_real = time.time()
+
 b.attach_kprobe(event="try_to_wake_up", fn_name="waker")
 b.attach_kprobe(event_re="^finish_task_switch$|^finish_task_switch\.isra\.\d$",
                 fn_name="oncpu")  # copied from tools/offwaketime.py
-first_ts = BPF.monotonic_time()
-first_ts_real = time.time()
 
 
 def reltime(ts_ns):
@@ -401,7 +396,6 @@ seen_cycles = {}
 seen_stacks = set()
 
 def callback(cpu, data, size,
-             timefmt="%Y-%m-%d %H:%M:%S.%f",
              lead_cycles=0,
              keep_secs=3,  # make sure lead_cycles * cfs_b period doesn't go over this
              format_cycle=format_cycle_text,
@@ -422,7 +416,8 @@ def callback(cpu, data, size,
     items = list(stats_map.items())
     matches = [(k, v) for k, v in items
                if k.cgroup_ino == cgroup_ino and min_cycle <= k.cycle <= cycle]
-    matches = sorted(matches, key=lambda x: (x[0].cycle, x[0].pid, x[1].total_runtime))
+    # sort is nice, but slow
+    # matches = sorted(matches, key=lambda x: (x[0].cycle, x[0].pid, x[1].total_runtime))
     for k, v in matches:
         format_proc(k, v)
 
@@ -442,7 +437,18 @@ def callback(cpu, data, size,
         del stats_map[k]
 
 
-events_callback = partial(callback, lead_cycles=lead_cycles)
+def _callback(cpu, data, size, **kw):
+    # this wrapper is needed to avoid blocking of ctrl-c.
+    global running
+    try:
+        callback(cpu, data, size, **kw)
+    except KeyboardInterrupt:
+        running = 0
+        raise
+
+
+events_callback = partial(_callback, lead_cycles=lead_cycles)
+
 
 if args.csv_path:
     csv_path = args.csv_path
@@ -455,7 +461,7 @@ if args.csv_path:
         print('ino,cyc,pid,waker,woken,runtime,count', file=proc_f)
         print('stackid,stack', file=stack_f)
 
-    events_callback = partial(callback,
+    events_callback = partial(_callback,
                               lead_cycles=lead_cycles,
                               unique_stacks=True,
                               format_cycle=partial(format_cycle_text, f=cycle_f,
@@ -481,6 +487,5 @@ if args.period:
 while running:
     try:
         b.perf_buffer_poll(timeout=1)
-        time.sleep(.005)
     except KeyboardInterrupt:
         exit()
