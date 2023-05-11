@@ -25,20 +25,41 @@ import time
 import datetime
 import argparse
 import sys
+import warnings
+import re
+import shutil
+import subprocess
 from pathlib import Path
+import itertools
 from functools import partial
 import threading
 from bcc import BPF
 from fractions import Fraction
 import traceback
 
-MSGTYPE = ['', 'ACCOUNT', 'RETURN']
-CGROUP_PATH='/sys/fs/cgroup/cpu,cpuacct/kubepods'
+HAS_PAHOLE = bool(shutil.which('pahole'))
+CGROUPV1_PATH='/sys/fs/cgroup/cpu,cpuacct/kubepods'
+CGROUPV2_PATH='/sys/fs/cgroup/kubepods.slice'
 
 # define BPF program
 bpf_text = r'''
+#include <linux/cgroup.h>
+#define RUNTIME_INF ((u64)~0ULL)
+
 /* hack: this makes container_of work */
+#undef BUILD_BUG_ON_MSG
 #define BUILD_BUG_ON_MSG(cond, msg)
+
+%(PAHOLE_DEFS)s
+%(EXTRA_MACROS)s
+
+static inline u32 tg_cgrp_ino(struct task_group *tg) {
+#ifdef HAS_KERNFS_NODE_ID
+    return tg->css.cgroup->kn->id.ino;
+#else
+    return (u32)tg->css.cgroup->kn->id;
+#endif
+}
 
 BPF_STACK_TRACE(stack_traces, 65536);
 
@@ -136,12 +157,13 @@ static inline bool filter_bandwidth_timer(struct cfs_bandwidth *cfs_b) {
     return 1;
 }
 
-static inline void dbg(struct pt_regs *ctx, u64 val) {
+static inline void dbg(struct pt_regs *ctx, u64 val1, u64 val2, u64 val3) {
     struct msg_t msg = {};
     msg.cgroup_ino = 999;
-    msg.cycle = val;
     msg.ts_ns = bpf_ktime_get_ns();
-    msg.cfs_b_runtime = val;
+    msg.cycle = val1;
+    msg.cfs_b_runtime = val2;
+    msg.cfs_b_quota = val3;
     events.perf_submit(ctx, &msg, sizeof(msg));
 }
 
@@ -151,19 +173,19 @@ int kprobe__sched_cfs_period_timer(struct pt_regs *ctx, struct hrtimer *timer)
         container_of(timer, struct cfs_bandwidth, period_timer);
     struct task_group *tg = 
         container_of(cfs_b, struct task_group, cfs_bandwidth);
-    u32 cgroup_ino = tg->css.cgroup->kn->id.ino;
-    if (!filter_cgroup(cgroup_ino)) {
+    u32 ino = tg_cgrp_ino(tg);
+    if (!filter_cgroup(ino)) {
         return 0;
     }
     if (!filter_bandwidth_timer(cfs_b)) {
         return 0;
     }
-    u32 cycle = cycle_counter_increment(cgroup_ino);
+    u32 cycle = cycle_counter_increment(ino);
     if (!cycle) {
         return 0;
     }
     struct msg_t msg = {};
-    msg.cgroup_ino = cgroup_ino;
+    msg.cgroup_ino = ino;
     msg.cycle = cycle;
     msg.ts_ns = bpf_ktime_get_ns();
     msg.cfs_b_runtime = cfs_b->runtime;
@@ -173,17 +195,7 @@ int kprobe__sched_cfs_period_timer(struct pt_regs *ctx, struct hrtimer *timer)
 }
 
 int waker(struct pt_regs *ctx, struct task_struct *p) {
-    /* we cannot filter by cgroup for the waker
-    struct task_group *tg = p->sched_task_group;
-    u32 cgroup_ino = tg->css.cgroup->kn->id.ino;
-    if (!filter_cgroup(cgroup_ino)) {
-        return 0;
-    }
-    struct cfs_bandwidth *cfs_b = &tg->cfs_bandwidth;
-    if (!filter_bandwidth_basic(cfs_b)) {
-        return 0;
-    }
-    */
+    /* we cannot filter by cgroup for the waker */
     u32 pid = p->pid;
     struct pid_stack_info_t zero = {};
     struct pid_stack_info_t *stack_info = pid_stack_map.lookup_or_try_init(&pid, &zero);
@@ -191,18 +203,26 @@ int waker(struct pt_regs *ctx, struct task_struct *p) {
         return 0;
     }
     stack_info->waker_stackid = stack_traces.get_stackid(ctx, 0);
+    return 0;
 }
 
 int oncpu(struct pt_regs *ctx, struct task_struct *prev) {
     struct task_struct *p = (struct task_struct *)bpf_get_current_task();
     struct task_group *tg = p->sched_task_group;
-    u32 cgroup_ino = tg->css.cgroup->kn->id.ino;
+    /*
+    struct cgroup* cgroup = tg->css.cgroup;
+    if (!cgroup) {
+        return 0;
+    }
+    u32 ino = cgroup_ino(cgroup);
+    */
+    u32 ino = tg_cgrp_ino(tg);
     u32 pid = p->pid;
     struct pid_stack_info_t *stack_info = pid_stack_map.lookup(&pid);
     if (!stack_info) {
         return 0;
     }
-    if (!filter_cgroup(cgroup_ino)) {
+    if (!filter_cgroup(ino)) {
         goto recycle;
     }
     struct cfs_bandwidth *cfs_b = &tg->cfs_bandwidth;
@@ -219,34 +239,24 @@ recycle:
 }
 
 
-static inline int account(struct pt_regs *ctx,
-                          struct task_group *tg,
-                          struct task_struct *p,
-                          u64 delta_exec)
-{
-    u32 cgroup_ino = tg->css.cgroup->kn->id.ino;
-    if (!filter_cgroup(cgroup_ino)) {
-        return 0;
-    }
-    struct cfs_bandwidth *cfs_b = &tg->cfs_bandwidth;
-    if (!filter_bandwidth_basic(cfs_b)) {
-        return 0;
-    }
-}
-
-
 RAW_TRACEPOINT_PROBE(sched_stat_runtime) {
     struct task_struct *p = (struct task_struct *)ctx->args[0];
     struct task_group *tg = p->sched_task_group;
-    u32 cgroup_ino = tg->css.cgroup->kn->id.ino;
-    if (!filter_cgroup(cgroup_ino)) {
+    /*
+    struct cgroup* cgroup = tg->css.cgroup;
+    if (!cgroup) {
+        return 0;
+    }
+    u32 ino = cgroup_ino(cgroup);
+    */
+    u32 ino = tg_cgrp_ino(tg);
+    if (!filter_cgroup(ino)) {
         return 0;
     }
     struct cfs_bandwidth *cfs_b = &tg->cfs_bandwidth;
     if (!filter_bandwidth_basic(cfs_b)) {
         return 0;
     }
-    // dbg(ctx, 888);
     u64 delta_exec = ctx->args[1];
     u32 pid = p->pid;
     int waker_stackid = -2; /* ENOENT */
@@ -256,13 +266,13 @@ RAW_TRACEPOINT_PROBE(sched_stat_runtime) {
         waker_stackid = stack_info_p->waker_stackid;
         woken_stackid = stack_info_p->woken_stackid;
     }
-    u32 cycle = cycle_counter_get(cgroup_ino);
+    u32 cycle = cycle_counter_get(ino);
     if (!cycle) {
         return 0;
     }
     struct stats_key_t stats_key = {};
-    stats_key.cgroup_ino = cgroup_ino;
-    stats_key.cycle = cycle_counter_get(cgroup_ino);
+    stats_key.cgroup_ino = ino;
+    stats_key.cycle = cycle_counter_get(ino);
     stats_key.pid = pid;
     stats_key.waker_stackid = waker_stackid;
     stats_key.woken_stackid = woken_stackid;
@@ -277,6 +287,7 @@ RAW_TRACEPOINT_PROBE(sched_stat_runtime) {
     }
     stats->total_runtime += delta_exec;
     stats->runtime_count++;
+    return 0;
 }
 '''
 
@@ -308,7 +319,38 @@ parser.add_argument('--csv-no-header', action='store_true',
                     help='do not write csv header when in csv mode')
 parser.add_argument('--bpf', action='store_true', help='print bpf code')
 args = parser.parse_args()
+
+if not HAS_PAHOLE:
+    raise Exception('This script requires pahole to run.')
+
 extra_macros = []
+
+def close_holes(src):
+    """ this function closes pahole holes by inserting char __hole0[size];
+    Original C headers might have __attribute__((__aligned__(x))) which opens
+    holes, Fortunately pahole leaves the hole in comments so we can fill it with
+    "magic"
+    """
+    i = 0
+    def repl(m):
+        nonlocal i
+        result = 'char __hole%d[%s];' % (i, m.group(1))
+        i += 1
+        return result
+    
+    return re.sub(r'/\* XXX (\d+) bytes hole.*\*/', repl, src)
+
+
+PAHOLE_DEFS = close_holes(subprocess.run(
+    ['pahole', '-C', 'rt_bandwidth,cfs_bandwidth,task_group'],
+    stdout=subprocess.PIPE, check=True, encoding='utf-8').stdout)
+
+HAS_KERNFS_NODE_ID = bool(subprocess.run(
+    ['pahole', '-q', '-C', 'kernfs_node_id'],
+    stdout=subprocess.PIPE, check=True, encoding='utf-8').stdout.strip())
+
+if HAS_KERNFS_NODE_ID:
+    extra_macros.append('#define HAS_KERNFS_NODE_ID')
 
 lead_cycles = args.lead_cycles
 if lead_cycles < 0:
@@ -317,10 +359,18 @@ if lead_cycles < 0:
 if args.cgroup_ino:
     extra_macros.append('#define FILTER_CGROUP_INO %d' % args.cgroup_ino)
 elif args.k8s_container:
-    try:
-        found = next(Path(CGROUP_PATH).glob('**/' + args.k8s_container))
-    except Exception as e:
-        raise FileNotFoundError("cgroup file for k8s_container %s doesn't exist" % args.k8s_container) from e
+    fname_pattern = '**/*' + args.k8s_container + '*'
+    cgroupv1_matches = list(Path(CGROUPV1_PATH).glob(fname_pattern))
+    cgroupv2_matches = list(Path(CGROUPV2_PATH).glob(fname_pattern))
+    matches = cgroupv1_matches + cgroupv2_matches
+    if not matches:
+        raise FileNotFoundError("cgroup file for k8s_container %s doesn't exist" % args.k8s_container)
+    
+    found = matches[0]
+    if len(matches) > 1:
+        warnings.warn('Multiple directories found for k8s-container %s, '
+                      'using the first match %s' % (args.k8s_container, found),
+                      RuntimeWarning)
     cgroup_ino = found.stat().st_ino
     extra_macros.append('#define FILTER_CGROUP_INO %d' % cgroup_ino)
 
@@ -333,10 +383,10 @@ elif args.min_remaining_perc:
     extra_macros.append('#define FILTER_BW_D %d' % f.denominator)
 
 # initialize BPF
-header = Path(__file__).parent.joinpath('sched.5.4.h').read_text()
-src = header + '\n'.join(extra_macros) + bpf_text
+src = bpf_text % {'PAHOLE_DEFS': PAHOLE_DEFS, "EXTRA_MACROS": '\n'.join(extra_macros)}
 if args.bpf:
     print(src)
+
 b = BPF(text=src)
 first_ts = BPF.monotonic_time()
 first_ts_real = time.time()
@@ -357,11 +407,11 @@ TIMEFMT_TEXT = "%H:%M:%S.%f"
 TIMEFMT_CSV = "%Y-%m-%d %H:%M:%S.%f"
 CYCLE_FMT_TEXT = '%s ino=%-6d cyc=%-7d runtime=%-9d quota=%-9d'
 CYCLE_FMT_CSV = '%s,%d,%d,%d,%d'
-PROC_FMT_TEXT = ' ' * 25 + '> ino=%-6d cyc=%-7d pid=%-9d comm=%-16s waker=%-6d woken=%-6d runtime=%-9d count=%-5d'
+PROC_FMT_TEXT = ' ' * 14 + '> ino=%-6d cyc=%-7d pid=%-9d comm=%-16s waker=%-6d woken=%-6d runtime=%-9d count=%-5d'
 PROC_FMT_CSV = '%d,%d,%d,%s,%d,%d,%d,%d'
-STACK_FMT_TEXT = ' ' * 24 + '>> stackid %6d: %s'
+STACK_FMT_TEXT = ' ' * 13 + '>> stackid %6d: %s'
 STACK_FMT_CSV = '%d,%s'
-STACK_SPLITTER_TEXT = '\n' + ' ' * 43
+STACK_SPLITTER_TEXT = '\n' + ' ' * 32
 STACK_SPLITTER_CSV = '>'
 
 
@@ -395,6 +445,9 @@ def format_stack_text(stack_traces, stackid, f=None, fmt=STACK_FMT_TEXT,
 seen_cycles = {}
 seen_stacks = set()
 
+def dbg(msg):
+    format_cycle_text(msg)
+
 def callback(cpu, data, size,
              lead_cycles=0,
              keep_secs=3,  # make sure lead_cycles * cfs_b period doesn't go over this
@@ -405,6 +458,10 @@ def callback(cpu, data, size,
              ):
     global seen_stacks
     msg = b["events"].event(data)
+    if msg.cgroup_ino == 999:
+        dbg(msg)
+        return
+
     cgroup_ino = msg.cgroup_ino
     cycle = msg.cycle - 1
     format_cycle(msg)
@@ -440,6 +497,8 @@ def callback(cpu, data, size,
 def _callback(cpu, data, size, **kw):
     # this wrapper is needed to avoid blocking of ctrl-c.
     global running
+    if not running:
+        return
     try:
         callback(cpu, data, size, **kw)
     except KeyboardInterrupt:
