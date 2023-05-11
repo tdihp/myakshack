@@ -4,9 +4,6 @@ is to aid investigation of CPU throttling in k8s similar to
 https://github.com/kubernetes/kubernetes/issues/97445, under assumption that
 microscopic CPU spikes under 100ms can trigger throttling.
 
-This needs a minimized Linux 5.4 kernel/sched/sched.h to function. A copy
-should be named sched.5.4.h neighboring this script.
-
 Examples:
 
 Filter by container, display last 3 cycles when this cycle is lower than 50%
@@ -24,18 +21,15 @@ License: MIT
 import time
 import datetime
 import argparse
-import sys
 import warnings
 import re
 import shutil
 import subprocess
 from pathlib import Path
-import itertools
 from functools import partial
 import threading
-from bcc import BPF
 from fractions import Fraction
-import traceback
+from bcc import BPF
 
 HAS_PAHOLE = bool(shutil.which('pahole'))
 CGROUPV1_PATH='/sys/fs/cgroup/cpu,cpuacct/kubepods'
