@@ -1,0 +1,166 @@
+kind: ClusterRole
+apiVersion: rbac.authorization.k8s.io/v1
+metadata:
+  name: naivewg
+rules:
+- apiGroups:
+  - ""
+  resources:
+  - nodes
+  verbs:
+  - get
+  - list
+  - watch
+  - patch
+- apiGroups:
+  - ""
+  resources:
+  - nodes/status
+  verbs:
+  - patch
+---
+kind: ClusterRoleBinding
+apiVersion: rbac.authorization.k8s.io/v1
+metadata:
+  name: naivewg
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: naivewg
+subjects:
+- kind: ServiceAccount
+  name: naivewg
+  namespace: kube-system
+---
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: naivewg
+  namespace: kube-system
+---
+apiVersion: apps/v1
+kind: DaemonSet
+metadata:
+  name: naivewg-ds
+  namespace: kube-system
+  labels:
+    app: naivewg
+spec:
+  selector:
+    matchLabels:
+      app: naivewg
+  template:
+    metadata:
+      labels:
+        app: naivewg
+    spec:
+      affinity:
+        nodeAffinity:
+          requiredDuringSchedulingIgnoredDuringExecution:
+            nodeSelectorTerms:
+            - matchExpressions:
+              - key: kubernetes.io/os
+                operator: In
+                values:
+                - linux
+      hostNetwork: true
+      priorityClassName: system-node-critical
+      tolerations:
+      - operator: Exists
+        effect: NoSchedule
+      serviceAccountName: naivewg
+      containers:
+      - name: naivewg
+        image: docker.io/python:slim
+        command:
+        - bash
+        - -c
+        - |
+          apt-get update && apt-get install --no-install-recommends -y iproute2 wireguard
+          pip install kubernetes
+          python /conf/controller.py
+        resources:
+          requests:
+            cpu: "100m"
+            memory: "50Mi"
+        securityContext:
+          privileged: true  # needed for ip netns
+          capabilities:
+            add: ["NET_ADMIN", "NET_RAW", "CAP_SYS_ADMIN"]
+        env:
+        - name: NAIVEWG_NODENAME
+          valueFrom:
+            fieldRef:
+              fieldPath: spec.nodeName
+        volumeMounts:
+        - name: run
+          mountPath: /run
+          mountPropagation: "Bidirectional"
+        - name: conf
+          mountPath: /conf
+        - name: cni
+          mountPath: /etc/cni/net.d
+      volumes:
+      - name: run
+        hostPath:
+          path: /run
+      # - name: cni-plugin
+      #   hostPath:
+      #     path: /opt/cni/bin
+      - name: cni
+        hostPath:
+          path: /etc/cni/net.d
+      - name: conf
+        configMap:
+          name: wgconf
+---
+kind: ConfigMap
+apiVersion: v1
+metadata:
+  labels:
+    k8s-app: ip-masq-agent
+  name: ip-masq-agent
+  namespace: kube-system
+data:
+  config: |
+    nonMasqueradeCIDRs:
+    - 10.224.0.0/16  # node cidr
+    - 10.244.0.0/16  # pod cidr
+    masqLinkLocal: true  # for 169.254.169.254
+    resyncInterval: 60s
+---
+apiVersion: apps/v1
+kind: DaemonSet
+metadata:
+  name: ip-masq-agent
+  namespace: kube-system
+spec:
+  selector:
+    matchLabels:
+      k8s-app: ip-masq-agent
+  template:
+    metadata:
+      labels:
+        k8s-app: ip-masq-agent
+    spec:
+      hostNetwork: true
+      containers:
+      - name: ip-masq-agent
+        image: registry.k8s.io/networking/ip-masq-agent:v2.9.3
+        securityContext:
+          privileged: false
+          capabilities:
+            add: ["NET_ADMIN", "NET_RAW"]
+        volumeMounts:
+          - name: config
+            mountPath: /etc/config
+      volumes:
+        - name: config
+          configMap:
+            # Note this ConfigMap must be created in the same namespace as the daemon pods - this spec uses kube-system
+            name: ip-masq-agent
+            optional: true
+            items:
+              # The daemon looks for its config in a YAML file at /etc/config/ip-masq-agent
+              - key: config
+                path: ip-masq-agent

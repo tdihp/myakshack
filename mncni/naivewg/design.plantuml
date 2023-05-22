@@ -1,0 +1,38 @@
+@startuml
+
+frame NS0  {
+    node br0
+    rectangle eth0
+    rectangle wg0 as ns0wg0 #line.dashed
+}
+
+note right of NS0
+    br0 holds "hub" IP inside nodepodcidr (.1)
+    route podcidr via "wg" on br0
+    masquerade podcidr->eth0 external traffic
+    eth0 has default route to Internet
+end note
+
+frame WG {
+    rectangle wg0 as wgwg0
+    rectangle veth0 as wgveth0
+}
+
+note bottom of WG
+    veth0 holds "wg" IP inside nodepodcidr (.2)
+    route default via "hub" on veth0
+    route podcidr on wg0
+end note
+
+frame PodN {
+    rectangle veth0 as podveth0
+}
+
+note bottom of PodN
+    route default via "hub" on veth0
+end note
+
+ns0wg0 -[dashed]-> wgwg0 : move
+br0 #-- wgveth0
+br0 #-- podveth0
+@enduml

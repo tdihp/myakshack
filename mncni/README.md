@@ -159,7 +159,7 @@ kubectl patch cm -n kube-flannel kube-flannel-cfg --patch-file lat/lat.cm.patch.
 kubectl patch ds -n kube-flannel kube-flannel-ds --patch-file lat/lat.ds.patch.yaml
 ```
 
-### Verify extension working
+### Verify plugin working
 
 To have a test deployment:
 
@@ -173,16 +173,33 @@ any outbound IP packets by having `lat: 50ms` in pod's annotation.
 To confirm latency is added, use `curl -v --trace-time http://<cluster-ip>` on
 Kubernetes node to confirm latency is more than 50ms.
 
-## naivebridge
 
-In this approach (named naivebridge) we try to mimic what's done in the
-[kubenet](https://learn.microsoft.com/en-us/azure/aks/configure-kubenet) AKS
-setting.
+## <del>naivebridge</del> naivewg (because bridge only is too boring)
 
-So below is a comparison of the current "kubenet" setting at time of writing,
-vs our approach.
+We have built a working CNI plugin, but how does a CNI based k8s networking
+solution look like? Most networking solutions, such as Cilium, Calico and
+Flannel, have other components than the CNI plugins. In this section we build
+a from-scratch CNI based k8s networking solution, to get a feeling of how such
+solutions will look like.
 
-|               | "kubenet"               | naivebridge |
-| ------------- | ---------                  | ------------- |
-| nodeipam      | kube-controller-manager    | [nodeipam.yaml](./nodeipam.yaml) |
-| routing       | azure-cloud-provider -> UDR | `ip route` with daemonset |
+Originally I wanted to replicate
+[AKS "kubenet"](https://learn.microsoft.com/en-us/azure/aks/configure-kubenet),
+but that's rather repetitive. To spice it up a bit, in this last lab, we deploy 
+[wireguard](https://www.wireguard.com/) based VPN for cross node pod2pod
+communication. 
+
+Network plan on a given node will look like below:
+
+![naivewgdesign](./naivewg/design.png)
+
+To explain in plain English:
+
+* We deploy a bridge which serves node-local pod communication
+* We route inter-node to-pod traffic to wg namespace, where wireguard interface
+  entrypts the traffic and transfer to peers.
+* Wireguard requires pub/priv key pair for each peer (node). We announce the
+  node's pubkey as an annotation on the node when setting up.
+* We monitor node updates and sync wireguard peer list regularly on each node
+  for scale-up and scale-down.
+
+Review [naivewg](./naivewg) directory for further detail.

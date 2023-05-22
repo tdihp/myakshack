@@ -76,6 +76,10 @@ spec:
     spec:
       hostNetwork: true
       serviceAccountName: nodeipam
+      priorityClassName: system-node-critical
+      tolerations:
+      - operator: Exists
+        effect: NoSchedule
       containers:
       - name: kube-controller-manager
         # TODO: change to template 
