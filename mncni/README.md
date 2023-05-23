@@ -149,14 +149,11 @@ lat works by:
    [netem](https://man7.org/linux/man-pages/man8/tc-netem.8.html) for simulating
    latency on nic.
 
-### Install on top of Flannel
-
-To install on top of already working Flannel:
+### Install on top of working CNI
 
 ```shell
-kubectl create cm -n kube-flannel lat --from-file=lat=lat/lat
-kubectl patch cm -n kube-flannel kube-flannel-cfg --patch-file lat/lat.cm.patch.yaml
-kubectl patch ds -n kube-flannel kube-flannel-ds --patch-file lat/lat.ds.patch.yaml
+kubectl create cm -n kube-system lat --from-file=lat/conf
+kubectl apply -f lat/deploy.yaml
 ```
 
 ### Verify plugin working
@@ -164,7 +161,7 @@ kubectl patch ds -n kube-flannel kube-flannel-ds --patch-file lat/lat.ds.patch.y
 To have a test deployment:
 
 ```shell
-kubectl apply -f lat/latpod.yaml
+kubectl apply -f lat/lattest.yaml
 ```
 
 This deployment configures all its pods to have 50ms latency when sending

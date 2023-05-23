@@ -5,9 +5,9 @@
 cniadd () {
     # we assume REQUEST, CNI_NETNS, CNI_IFNAME is set
     # we extract latency from capabilities
-    lat=`echo "$REQUEST" | jq -r '.runtimeConfig["io.kubernetes.cri.pod-annotations"].lat'`
-    cniVersion=`echo "$REQUEST" | jq -r .cniVersion`
-    prevResult=`echo "$REQUEST" | jq -r .prevResult`
+    lat=`echo -n "$REQUEST" | jq -r '.runtimeConfig["io.kubernetes.cri.pod-annotations"].lat'`
+    cniVersion=`echo -n "$REQUEST" | jq -r .cniVersion`
+    prevResult=`echo -n "$REQUEST" | jq -r .prevResult`
     # we check if capability "lat" value is valid
     # numbers following ns, us or ms 
     if [[ "$lat" =~ ^[1-9][0-9]*[num]?s$ ]]; then
@@ -17,12 +17,12 @@ cniadd () {
         echo -n "$prevResult"
         exit 0;
     elif [[ "$lat" == "null" ]] || [[ "$lat" == "" ]]; then
-        # we savely ignore it since it is not configured
-        echo "$prevResult"
+        # we safely ignore it since it is not configured
+        echo -n "$prevResult"
         exit 0;
     else
         # we raise error
-        echo "{\"cniVersion\":\"$cniVersion\",\"details\":\"Invalid lat $lat\""',"code":7,"msg":"Invalid lat"}'
+        echo -n "{\"cniVersion\":\"$cniVersion\",\"details\":\"Invalid lat $lat\""',"code":7,"msg":"Invalid lat"}'
         exit 1
     fi
 }
@@ -46,7 +46,7 @@ case $CNI_COMMAND in
     VERSION)
         REQUEST=$(</dev/stdin)
         # nobody really calls this, we still provice this for compatibility
-        cniVersion=`echo "$REQUEST" | jq -r .cniVersion`
+        cniVersion=`echo -n "$REQUEST" | jq -r .cniVersion`
         echo -n "{\"cniVersion\":\"$cniVersion\""',"supportedVersions":["0.3.0","0.3.1","0.4.0","1.0.0"]}'
         exit 0
         ;;

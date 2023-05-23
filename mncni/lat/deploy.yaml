@@ -1,0 +1,72 @@
+apiVersion: apps/v1
+kind: DaemonSet
+metadata:
+  name: lat-ds
+  namespace: kube-system
+  labels:
+    app: lat
+spec:
+  selector:
+    matchLabels:
+      app: lat
+  template:
+    metadata:
+      labels:
+        app: lat
+    spec:
+      affinity:
+        nodeAffinity:
+          requiredDuringSchedulingIgnoredDuringExecution:
+            nodeSelectorTerms:
+            - matchExpressions:
+              - key: kubernetes.io/os
+                operator: In
+                values:
+                - linux
+      hostNetwork: true
+      priorityClassName: system-node-critical
+      tolerations:
+      - operator: Exists
+        effect: NoSchedule
+      containers:
+      - name: install-lat
+        image: docker.io/library/alpine:3
+        volumeMounts:
+        - name: cni-plugin
+          mountPath: /opt/cni/bin
+        - name: cni
+          mountPath: /etc/cni/net.d
+        - name: cfg
+          mountPath: /mnt/cfg
+        command:
+          - sh
+          - -xec
+          - |
+            cp /mnt/cfg/lat /opt/cni/bin
+            chmod +x /opt/cni/bin/lat
+            apk add jq
+            cd /etc/cni/net.d
+            while [ 1 ]
+            do
+              TGT=`ls -1 *.conflist | head -n 1`
+              if [ ! -z "$TGT" ]; then
+                oldhash=`md5sum "$TGT" | cut -f 1 -d " "`
+                <"$TGT" jq --slurpfile lat /mnt/cfg/lat.json '.plugins |= (.|map(select(.type!="lat"))) + $lat' >"${TGT}.new"
+                newhash=`md5sum "${TGT}.new" | cut -f 1 -d " "`
+                if [ "$oldhash" != "$newhash" ]; then
+                  cp "$TGT" "${TGT}.backup"
+                  mv "${TGT}.new" "$TGT"
+                fi
+              fi
+              sleep 60
+            done
+      volumes:
+      - name: cni-plugin
+        hostPath:
+          path: /opt/cni/bin
+      - name: cni
+        hostPath:
+          path: /etc/cni/net.d
+      - name: cfg
+        configMap:
+          name: lat
