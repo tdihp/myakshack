@@ -181,8 +181,8 @@ solutions will look like.
 
 Originally I wanted to replicate
 [AKS "kubenet"](https://learn.microsoft.com/en-us/azure/aks/configure-kubenet),
-but that's rather repetitive. To spice it up a bit, in this last lab, we deploy 
-[wireguard](https://www.wireguard.com/) based VPN for cross node pod2pod
+but that's rather repetitive. To spice things up a bit, in this last lab, we
+deploy [wireguard](https://www.wireguard.com/) based VPN for cross node pod2pod
 communication. 
 
 Network plan on a given node will look like below:
@@ -200,3 +200,18 @@ To explain in plain English:
   for scale-up and scale-down.
 
 Review [naivewg](./naivewg) directory for further detail.
+
+# Exercises
+
+* Patch any AKS network setting to add
+  [traffic shaping](https://kubernetes.io/docs/concepts/extend-kubernetes/compute-storage-net/network-plugins/#support-traffic-shaping)
+* Develop a CNI plugin that changes an existing route inside pod to add
+  `quickack 1` to its options. See https://www.webconn.tech/kb/how-to-disable-delayed-acks
+  for use case and implementation.
+* Find out what happens if multiple CNI conflists exists inside
+  `/etc/cni/net.d`, and what happens if mutliple conflists are active.
+
+# Further Readings
+
+* https://ronaknathani.com/blog/2020/08/how-a-kubernetes-pod-gets-an-ip-address/
+* https://developers.redhat.com/blog/2018/10/22/introduction-to-linux-interfaces-for-virtual-networking
