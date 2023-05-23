@@ -199,9 +199,19 @@ To explain in plain English:
 * We monitor node updates and sync wireguard peer list regularly on each node
   for scale-up and scale-down.
 
+To install:
+
+```shell
+kubectl -n kube-system create cm --from-file naivewg/conf wgconf
+kubectl apply -f nodeipam.yaml
+kubectl apply -f deploy.yaml
+```
+
 Review [naivewg](./naivewg) directory for further detail.
 
-# Exercises
+
+
+## Exercises
 
 * Patch any AKS network setting to add
   [traffic shaping](https://kubernetes.io/docs/concepts/extend-kubernetes/compute-storage-net/network-plugins/#support-traffic-shaping)
@@ -211,7 +221,7 @@ Review [naivewg](./naivewg) directory for further detail.
 * Find out what happens if multiple CNI conflists exists inside
   `/etc/cni/net.d`, and what happens if mutliple conflists are active.
 
-# Further Readings
+## Further Readings
 
 * https://ronaknathani.com/blog/2020/08/how-a-kubernetes-pod-gets-an-ip-address/
 * https://developers.redhat.com/blog/2018/10/22/introduction-to-linux-interfaces-for-virtual-networking
