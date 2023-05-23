@@ -144,6 +144,10 @@ spec:
         k8s-app: ip-masq-agent
     spec:
       hostNetwork: true
+      priorityClassName: system-node-critical
+      tolerations:
+      - operator: Exists
+        effect: NoSchedule
       containers:
       - name: ip-masq-agent
         image: registry.k8s.io/networking/ip-masq-agent:v2.9.3
