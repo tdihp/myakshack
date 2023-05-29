@@ -1,0 +1,111 @@
+#!/usr/bin/env bpftrace
+/*
+ * fsblame    count vfs calls to a given filesystem by provided magic
+ *
+ * This works by tracing all potential vfs functions
+ *
+ * USAGE: fsblame.bt <magic>
+ * Example:
+ * for cifs: fsblame.bt 4283649346. (CIFS_MAGIC_NUMBER, 0xFF534D42)
+ * for ext4: fsblame.bt 61267. (EXT4_SUPER_MAGIC, 0xEF53)
+ *
+ * Copyright (c) 2023, Ping He.
+ * License: MIT
+ */
+
+#include <linux/fs.h>
+
+
+BEGIN
+{
+    printf("Tracing VFS calls for %x ... Hit Ctrl-C to end.\n", $1);
+}
+
+interval:s:10
+{
+    time(); print(@); clear(@);
+}
+
+// struct file * on arg0
+kprobe:vfs_test_lock,
+kprobe:vfs_lock_file,
+kprobe:vfs_cancel_lock,
+kprobe:vfs_setlease,
+kprobe:vfs_ioctl,
+kprobe:vfs_read,
+kprobe:vfs_write,
+kprobe:vfs_readv,
+kprobe:vfs_dedupe_file_range,
+kprobe:vfs_fallocate,
+kprobe:vfs_fsync_range,
+kprobe:vfs_fsync,
+kprobe:vfs_llseek,
+kprobe:vfs_setpos,
+kprobe:vfs_fadvise
+{
+    $fp = (struct file *)arg0;
+    if ($fp->f_inode->i_sb->s_magic == $1) {
+        @[func, 0, pid, comm]++;
+    }
+}
+
+// struct file * on arg0 and arg2
+kprobe:vfs_copy_file_range,
+kprobe:vfs_clone_file_range,
+kprobe:vfs_dedupe_file_range_one
+{
+    $fp0 = (struct file *)arg0;
+    if ($fp0->f_inode->i_sb->s_magic == $1)
+    {
+        @[func, 0, pid, comm]++;
+    }
+    $fp1 = (struct file *)arg2;
+    if ($fp1->f_inode->i_sb->s_magic == $1)
+    {
+        @[func, 1, pid, comm]++;
+    }
+}
+
+// const struct path * on arg0
+kprobe:vfs_statfs,
+kprobe:vfs_truncate,
+kprobe:vfs_getattr_nosec,
+kprobe:vfs_getattr
+{
+    $pp = (struct path *)arg0;
+    if ($pp->dentry->d_sb->s_magic == $1)
+    {
+        @[func, 0, pid, comm]++;
+    }
+}
+
+// struct dentry * on arg0
+kprobe:vfs_readlink
+{
+    $dp = (struct dentry *)arg0;
+    if ($dp->d_sb->s_magic == $1)
+    {
+        @[func, 0, pid, comm]++;
+    }
+}
+
+// struct inode * on arg0
+kprobe:vfs_create,
+kprobe:vfs_mkdir,
+kprobe:vfs_mknod,
+kprobe:vfs_symlink,
+kprobe:vfs_rmdir,
+kprobe:vfs_unlink,
+kprobe:vfs_whiteout
+{
+    $ip = (struct inode *)arg0;
+    if ($ip->i_sb->s_magic == $1)
+    {
+        @[func, 0, pid, comm]++;
+    }
+}
+
+// not traced
+// extern int vfs_statx(int, const char __user *, int, struct kstat *, u32);
+// extern int vfs_statx_fd(unsigned int, struct kstat *, u32, unsigned int);
+// extern int vfs_link(struct dentry *, struct inode *, struct dentry *, struct inode **);
