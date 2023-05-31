@@ -193,7 +193,7 @@ To explain in plain English:
 
 * We deploy a bridge which serves node-local pod communication
 * We route inter-node to-pod traffic to wg namespace, where wireguard interface
-  entrypts the traffic and transfer to peers.
+  encrypts the traffic and transfer to peers.
 * Wireguard requires pub/priv key pair for each peer (node). We announce the
   node's pubkey as an annotation on the node when setting up.
 * We monitor node updates and sync wireguard peer list regularly on each node
@@ -204,12 +204,10 @@ To install:
 ```shell
 kubectl -n kube-system create cm --from-file naivewg/conf wgconf
 kubectl apply -f nodeipam.yaml
-kubectl apply -f deploy.yaml
+kubectl apply -f naivewg/deploy.yaml
 ```
 
 Review [naivewg](./naivewg) directory for further detail.
-
-
 
 ## Exercises
 
