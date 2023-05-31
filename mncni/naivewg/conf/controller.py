@@ -8,6 +8,9 @@ from pathlib import Path
 from ipaddress import ip_network, ip_address, ip_interface
 from kubernetes import client, config
 
+
+logger = logging.getLogger('naivewg')
+
 config.load_config()
 v1 = client.CoreV1Api()
 
@@ -26,14 +29,12 @@ WG_CONFPATH = getenv('NAIVEWG_CONFPATH', '/run/wg/wg.conf')
 WG_PUBKEY_ANNOTATION = getenv('NAIVEWG_PUBKEY_ANNOTATION',
                               'mncni.myakshack.tdihp.github.com/naivewg-pubkey')
 WG_PORT = int(getenv('NAIVEWG_PORT', '28384'))
-# 116.127.107 >> ASCII N.W.G
-# WG_MAGIC_IP = getenv('NAIVEWG_MAGIC_IP', '127.116.127.107/32') 
 CLUSTER_CIDR = getenv('NAIVEWG_CLUSTER_CIDR', '10.244.0.0/16')
 
 
 def sh(cmd, **kwargs):
     """utility function for easier access to shell-like command line"""
-    logging.debug('$ %s (%s)', cmd, kwargs)
+    logger.debug('$ %s (%s)', cmd, kwargs)
     kw = {
         'shell': True,
         'stdout': subprocess.PIPE,
@@ -42,7 +43,7 @@ def sh(cmd, **kwargs):
     }
     kw.update(kwargs)
     result = subprocess.run(cmd, **kw)
-    logging.debug('$> %s', result)
+    logger.debug('$> %s', result)
     return result
 
 
@@ -71,18 +72,18 @@ def ensure_wg_credential(wg_keypath, nodename, annotation_key):
     p = Path(wg_keypath)
     if p.exists():
         privkey = p.read_text()
-        logging.debug('got privkey from file %s' % p)
+        logger.debug('got privkey from file %s' % p)
     else:
         privkey = sh('wg genkey', check=True).stdout
         p.parent.mkdir(parents=True, exist_ok=True)
         p.write_text(privkey)
-        logging.debug('written privkey to file %s' % p)
+        logger.debug('written privkey to file %s' % p)
 
     pubkey = sh('wg pubkey', check=True, input=privkey).stdout
-    logging.debug('pubkey: %s', pubkey)
+    logger.debug('pubkey: %s', pubkey)
     body = {'metadata': {'annotations': {annotation_key: pubkey}}}
     v1.patch_node(nodename, body)
-    logging.info('pubkey annotation patched')
+    logger.info('pubkey annotation patched')
     
 
 def ensure_network(clustercidr, podcidr):
@@ -93,25 +94,25 @@ def ensure_network(clustercidr, podcidr):
     wg_veth_interface = ip_interface(str(wg_veth_address) + '/'
                                      + str(podcidr.prefixlen))
 
-    logging.info('ensuring namespace wg')
+    logger.info('ensuring namespace wg')
     r = sh('ip -json netns', check=True)
     nslist = json.loads(r.stdout) if r.stdout else []
     if not any(ns['name'] == 'wg' for ns in nslist):
-        logging.info('creating namespace wg')
+        logger.info('creating namespace wg')
         r = sh('ip netns add wg', check=True)
 
-    logging.info('ensuring br0')
+    logger.info('ensuring br0')
     if not has_link('br0'):
-        logging.info('br0 not found, creating')
+        logger.info('br0 not found, creating')
         sh('ip link add br0 type bridge', check=True)
         sh('ip link set br0 up', check=True)
     sh(f'ip address replace {br0_interface} dev br0', check=True)
     sh(f'ip route replace {clustercidr} via {wg_veth_address} dev br0',
         check=True)
     
-    logging.info('ensuring vethwg')
+    logger.info('ensuring vethwg')
     if not has_link('vethwg'):
-        logging.info('creating vethwg')
+        logger.info('creating vethwg')
         sh('ip link add vethwg type veth peer name veth0 netns wg', check=True)
         sh('ip link set vethwg master br0 up', check=True)
         sh('ip -n wg link set veth0 up', check=True)
@@ -119,9 +120,9 @@ def ensure_network(clustercidr, podcidr):
     sh(f'ip -n wg route replace default via {br0_address} dev veth0',
        check=True)
 
-    logging.info('ensuring wg0')
+    logger.info('ensuring wg0')
     if not has_link('wg0', 'wg'):
-        logging.info('wg0 not found, creating')
+        logger.info('wg0 not found, creating')
         # we first create wg0 in ns0, then move it to wg namespace.
         sh('ip link add wg0 type wireguard', check=True)
         sh('ip link set wg0 netns wg up')
@@ -145,7 +146,7 @@ def ensure_wg_peers(nodename, wg_keypath, wg_confpath, wg_port, annotation_key):
             address = addresses[0]
             peers.append((pubkey, ip_address(address), ip_network(podcidr)))
         else:
-            logging.warning('cannot add node %s as peer. '
+            logger.warning('cannot add node %s as peer. '
                             'addresses: %s, podcidr: %s, pubkey: %s',
                             node.metadata.name, pubkey, addresses, podcidr)
 
@@ -177,31 +178,36 @@ def node_network_ready(nodename):
 
 
 def main():
-    logging.info('getting podcidr')
+    logger.info('getting podcidr')
     podcidr = get_podcidr(NODENAME)
-    logging.info('got pod cidr: %s', podcidr)
+    logger.info('got pod cidr: %s', podcidr)
 
-    logging.info('generating cni template')
+    logger.info('generating cni template')
     ensure_cni_conf(WG_CNI_TEMPLATE, WG_CNI_PATH, podcidr)
 
-    logging.info('ensuring wg credential')
+    logger.info('ensuring wg credential')
     ensure_wg_credential(WG_KEYPATH, NODENAME, WG_PUBKEY_ANNOTATION)
 
-    logging.info('ensuring node local network')
+    logger.info('ensuring node local network')
     ensure_network(CLUSTER_CIDR, podcidr)
-    logging.info('network ensured')
+    logger.info('network ensured')
 
-    logging.info('ensuring peers the first time')
+    logger.info('ensuring peers the first time')
     ensure_wg_peers(NODENAME, WG_KEYPATH, WG_CONFPATH, WG_PORT,
                     WG_PUBKEY_ANNOTATION)
-    logging.info('all green, we mark node network as ready')
+    logger.info('all green, we mark node network as ready')
     node_network_ready(NODENAME)
     while True:
-        logging.info('ensuring wg peers')
+        logger.info('ensuring wg peers')
         ensure_wg_peers(NODENAME, WG_KEYPATH, WG_CONFPATH, WG_PORT,
                         WG_PUBKEY_ANNOTATION)
         time.sleep(60)
 
 
-logging.basicConfig(level=logging.DEBUG)
+# we configure logging here
+handler = logging.StreamHandler()
+formatter = logging.Formatter('%(asctime)s %(levelname)-8s %(message)s')
+handler.setFormatter(formatter)
+logger.addHandler(handler)
+logger.setLevel(logging.DEBUG)
 main()
