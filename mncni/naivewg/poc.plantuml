@@ -31,7 +31,7 @@ note right of NS0
     ..ip route..
     <podcidr> via <wg> dev br0
     ..iptables..
-    -t nat -I POSTROUTING -s <clustercidr> -o eth0 -j MASQUERADE 
+    -t nat -I POSTROUTING -s <clustercidr> ! -d <clustercidr> -j MASQUERADE
 end note
 
 frame WG {
