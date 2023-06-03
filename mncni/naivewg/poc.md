@@ -17,6 +17,7 @@ On a Debian/Ubuntu box:
 ```sh
 sudo -s
 apt-get update && apt-get install -y iproute2 iptables wireguard
+sysctl net.ipv4.ip_forward=1
 ```
 
 ## Construction Overview
