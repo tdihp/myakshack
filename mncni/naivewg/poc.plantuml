@@ -1,0 +1,98 @@
+@startuml
+
+note as N1
+    <clustercidr>: 10.11.0.0/16
+    <podcidr>: 10.11.12.0/24
+end note
+
+frame NS0 {
+    node br0 [
+        br0
+        ---
+        addr: 10.11.12.1/24 <gateway>
+    ]
+    rectangle ns0wg0 #line.dashed [
+        wg0
+        ---
+        listen: 28384
+    ] 
+    rectangle ns0wgremote #line.dashed [
+        wgremote
+        ---
+        listen: 28283
+    ]
+    
+    rectangle eth0
+    br0 -[hidden]left-> ns0wg0
+    ns0wg0 ..right. ns0wgremote : peer
+    eth0 -[hidden]down-> br0
+}
+note right of NS0
+    ..ip route..
+    <podcidr> via <wg> dev br0
+    ..iptables..
+    -t nat -I POSTROUTING -s <clustercidr> -o eth0 -j MASQUERADE 
+end note
+
+frame WG {
+
+    rectangle wg0 as wgwg0 
+    rectangle wgveth0 [
+        veth0
+        ---
+        addr: 10.11.12.2/24 <wg>
+    ]
+}
+note bottom of WG
+    ..ip route..
+    default via <gateway> dev veth0
+    <clustercidr> dev wg0
+end note
+
+ns0wg0 -[dashed]-> wgwg0 : move
+br0 #-- wgveth0
+
+frame poda {
+
+    rectangle podaveth0 [
+        veth0
+        ---
+        addr: 10.11.12.101/24
+    ]
+}
+note bottom of poda
+    ..ip route..
+    default via <gateway> dev veth0
+end note
+
+br0 #-- podaveth0
+
+frame podb {
+
+    rectangle podbveth0 [
+        veth0
+        ---
+        addr: 10.11.12.102/24
+    ]
+}
+
+note bottom of podb
+    ..ip route..
+    default via <gateway> dev veth0
+end note
+
+br0 #-- podbveth0
+
+frame remote {
+
+    rectangle remotewgremote [
+        wgremote
+        ---
+        addr: 10.11.77.77/16
+    ]
+}
+
+ns0wgremote -[dashed]-> remotewgremote : move
+
+
+@enduml

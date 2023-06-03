@@ -199,6 +199,8 @@ To explain in plain English:
 * We monitor node updates and sync wireguard peer list regularly on each node
   for scale-up and scale-down.
 
+[A proof of concept](./naivewg/poc.md) build with only shell scripts is made to confirm it works prior to implementing. 
+
 To install:
 
 ```shell
