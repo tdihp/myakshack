@@ -17,7 +17,10 @@ nodeSelector.
 
 ## Usage
 
-See [testpod](./testpod.yaml) for a example pod.
+Quick ack will only be applied to pods that has annotation `enable-quickack`,
+once the CNI patch is applied.
 
-Note that the hostPath is given to block pod from being started before CNI
-patching.
+The CNI patch puts file `/var/run/quickack-enabled`. User can mount this file
+to block pod from being started before CNI patching.
+
+See [testpod](./testpod.yaml) for an example pod.
