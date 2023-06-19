@@ -1,0 +1,78 @@
+apiVersion: apps/v1
+kind: DaemonSet
+metadata:
+  name: quickack-ds
+  namespace: kube-system
+  labels:
+    app: quickack
+spec:
+  selector:
+    matchLabels:
+      app: quickack
+  template:
+    metadata:
+      labels:
+        app: quickack
+    spec:
+      affinity:
+        nodeAffinity:
+          requiredDuringSchedulingIgnoredDuringExecution:
+            nodeSelectorTerms:
+            - matchExpressions:
+              - key: kubernetes.io/os
+                operator: In
+                values:
+                - linux
+      hostNetwork: true
+      priorityClassName: system-node-critical
+      tolerations:
+      - operator: Exists
+        effect: NoSchedule
+      containers:
+      - name: install-quickack
+        image: docker.io/library/alpine:3
+        volumeMounts:
+        - name: cni-plugin
+          mountPath: /opt/cni/bin
+        - name: cni
+          mountPath: /etc/cni/net.d
+        - name: cfg
+          mountPath: /mnt/cfg
+        - name: run
+          mountPath: /var/run
+        command:
+          - sh
+          - -xec
+          - |
+            cp /mnt/cfg/quickack /opt/cni/bin
+            chmod +x /opt/cni/bin/quickack
+            apk add jq
+            cd /etc/cni/net.d
+            while [ 1 ]
+            do
+              TGT=`ls -1 *.conflist | head -n 1`
+              if [ ! -z "$TGT" ]; then
+                oldhash=`md5sum "$TGT" | cut -f 1 -d " "`
+                <"$TGT" jq --slurpfile quickack /mnt/cfg/quickack.json '.plugins |= (.|map(select(.type!="quickack"))) + $quickack' >"${TGT}.new"
+                newhash=`md5sum "${TGT}.new" | cut -f 1 -d " "`
+                if [ "$oldhash" != "$newhash" ]; then
+                  cp "$TGT" "${TGT}.backup"
+                  mv "${TGT}.new" "$TGT"
+                  touch /var/run/quickack-enabled
+                fi
+              fi
+              sleep 60
+            done
+      volumes:
+      - name: cni-plugin
+        hostPath:
+          path: /opt/cni/bin
+      - name: cni
+        hostPath:
+          path: /etc/cni/net.d
+      - name: run
+        hostPath:
+          path: /var/run
+      - name: cfg
+        configMap:
+          name: quickack

@@ -1,0 +1,6 @@
+{
+  "type": "quickack",
+  "capabilities": {
+    "io.kubernetes.cri.pod-annotations": true
+  }
+}

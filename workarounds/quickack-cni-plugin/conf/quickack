@@ -1,0 +1,48 @@
+#!/bin/bash
+# Add quickack 1 to default route
+# This plugin expects bash, jq, ip route to be available.
+cniadd () {
+    # we assume REQUEST, CNI_NETNS, CNI_IFNAME is set
+    # we extract latency from capabilities
+    quickack=`echo -n "$REQUEST" | jq -r '.runtimeConfig["io.kubernetes.cri.pod-annotations"]["enable-quickack"]'`
+    cniVersion=`echo -n "$REQUEST" | jq -r .cniVersion`
+    prevResult=`echo -n "$REQUEST" | jq -r .prevResult`
+    # we check if capability "lat" value is valid
+    # numbers following ns, us or ms 
+    if [[ "$quickack" =~ ^(1|t|true|y|yes)$ ]]; then
+        prev=`ip -n "${CNI_NETNS##*/}" route show default`
+        [[ ! -z "$prev" ]] && ip -n "${CNI_NETNS##*/}" route change $prev quickack 1
+    fi
+    # we safely ignore other values
+    echo -n "$prevResult"
+    exit 0;
+    
+}
+
+
+case $CNI_COMMAND in
+    ADD)
+        REQUEST=$(</dev/stdin)
+        cniadd
+        ;;
+    DEL)
+        REQUEST=$(</dev/stdin)
+        # nothing to do on del
+        exit 0
+        ;;
+    CHECK)
+        REQUEST=$(</dev/stdin)
+        # we always succeed
+        exit 0
+        ;;
+    VERSION)
+        REQUEST=$(</dev/stdin)
+        # nobody really calls this, we still provice this for compatibility
+        cniVersion=`echo -n "$REQUEST" | jq -r .cniVersion`
+        echo -n "{\"cniVersion\":\"$cniVersion\""',"supportedVersions":["0.3.0","0.3.1","0.4.0","1.0.0"]}'
+        exit 0
+        ;;
+    *)
+        echo "Invalid CNI_COMMAND $CNI_COMMAND"
+        exit 1
+esac
