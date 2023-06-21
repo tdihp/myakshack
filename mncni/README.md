@@ -217,7 +217,7 @@ Review [naivewg](./naivewg) directory for further detail.
   [traffic shaping](https://kubernetes.io/docs/concepts/extend-kubernetes/compute-storage-net/network-plugins/#support-traffic-shaping)
 * Develop a CNI plugin that changes an existing route inside pod to add
   `quickack 1` to its options. See https://www.webconn.tech/kb/how-to-disable-delayed-acks
-  for use case and implementation.
+  for use case and implementation. [Spoiler](/workarounds/quickack-cni-plugin)
 * Find out what happens if multiple CNI conflists exists inside
   `/etc/cni/net.d`, and what happens if mutliple conflists are active.
 
