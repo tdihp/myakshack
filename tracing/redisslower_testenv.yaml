@@ -1,0 +1,35 @@
+
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: redis-test
+  labels:
+    app: redis-test
+spec:
+  replicas: 2
+  selector:
+    matchLabels:
+      app: redis-test
+  template:
+    metadata:
+      labels:
+        app: redis-test
+    spec:
+      containers:
+      - image: library/redis:5
+        name: redis
+        command: ['redis-server']
+
+      - image: library/redis:5
+        name: bench
+        # command: ['redis-benchmark', '-l']
+        command:
+        - bash
+        - -c
+        - |
+          </dev/urandom od -vAn -N200000 -tu4 | xargs -I{} bash -c "redis-cli rpush stressme {} >/dev/null"
+          sleep 1
+          while [ 1 ]; do
+            redis-cli sort stressme >/dev/null
+            sleep 1
+          done
