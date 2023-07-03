@@ -279,7 +279,6 @@ def clocktime(ts_ns):
     return reltime(ts_ns) + first_ts_real
 
 library=str(absolute_binary_path)
-func = 'call'
 b.attach_uprobe(name=library, sym=func, fn_name="trace_entry")
 b.attach_uretprobe(name=library, sym=func, fn_name="trace_return")
 
