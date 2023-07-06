@@ -17,10 +17,14 @@ $ python3 redisloopcalls.py -p 12345 -m 10000
 * Filter with only oncpu time larger than 1ms
 $ python3 redisloopcalls.py --min-oncpu 1000
 
+* Sample with 99hz frequency and print first 4 stack samples hit
+$ python3 redisloopcalls.py -f99 --max-samples 4
+
 CHANGELOG
 
 2023-07-05 Initial script
 2023-07-06 Add oncpu time and switch count, add --min-oncpu flag
+           Add perf sampling 
 
 Copyright (c) 2023, Ping He.
 License: MIT
@@ -37,6 +41,7 @@ from bcc import BPF, PerfType, PerfSWConfig
 
 bpf_text = r'''
 #include <uapi/linux/ptrace.h>
+#include <uapi/linux/bpf_perf_event.h>
 
 struct redisCommand {
     char *name;
@@ -74,13 +79,20 @@ struct call_stats_t {
     u32 count;
 };
 
+struct sample_t {
+    int user_stack_id;
+    int kernel_stack_id;
+};
+
 struct loop_state_t {
     u64 start_ns;
     u64 sched_ns;
     u64 oncpu_ns;
     u32 sw;
     u32 overflow;
+    u32 hits;
     struct call_stats_t call_stats[MAX_COMMANDS];
+    struct sample_t samples[MAXSAMPLES];
 };
 
 struct command_key_t {
@@ -98,10 +110,12 @@ struct command_info_table_t {
     struct command_info_t command_info[MAX_COMMANDS];
 };
 
+
 BPF_HASH(command_index, struct command_key_t, u32);
 BPF_HASH(command_info_table_map, u32, struct command_info_table_t);
 BPF_HASH(loop_state_map, u32, struct loop_state_t);
 BPF_HASH(call_state_map, u32, struct call_state_t);
+BPF_STACK_TRACE(stack_traces, STACK_STORAGE_SIZE);
 
 struct msg_t {
     u32 tgid;
@@ -111,8 +125,9 @@ struct msg_t {
     u64 oncpu_ns;
     u32 sw;
     u32 overflow;
+    u32 hits;
     struct call_stats_t call_stats[MAX_COMMANDS];
-    
+    struct sample_t samples[MAXSAMPLES];
 };
 
 BPF_PERF_OUTPUT(events);
@@ -155,9 +170,11 @@ int trace_loop_return(struct pt_regs *ctx)
     msg.oncpu_ns = loop_state->oncpu_ns;
     msg.sw = loop_state->sw;
     msg.overflow = loop_state->overflow;
+    msg.hits = loop_state->hits;
     __builtin_memcpy(&msg.call_stats,
                      &loop_state->call_stats,
                      sizeof(msg.call_stats));
+    __builtin_memcpy(&msg.samples, &loop_state->samples, sizeof(msg.samples));
     events.perf_submit(ctx, &msg, sizeof(msg));
 recycle:
     loop_state_map.delete(&pid);
@@ -250,6 +267,22 @@ TRACEPOINT_PROBE(sched, sched_wakeup) {
     return 0;
 }
 
+int do_perf_event(struct bpf_perf_event_data *ctx) {
+    u64 tgid_pid = bpf_get_current_pid_tgid();
+    FILTER_PID;
+    u32 pid = tgid_pid;
+    struct loop_state_t *loop_state = loop_state_map.lookup(&pid);
+    if (!loop_state) {
+        return 0;
+    }
+    if (loop_state->hits < MAXSAMPLES) {
+        struct sample_t *sample = &loop_state->samples[loop_state->hits];
+        sample->user_stack_id = stack_traces.get_stackid(&ctx->regs, BPF_F_USER_STACK);
+        sample->kernel_stack_id = stack_traces.get_stackid(&ctx->regs, 0);
+    }
+    loop_state->hits++;
+    return 0;
+}
 '''
 
 
@@ -288,6 +321,13 @@ parser.add_argument('-m', '--min-lat', default=1000, type=int,
                     'to 1000us (1ms)')
 parser.add_argument('--min-oncpu', type=int,
                     help='min oncpu time to display in microseconds (us)')
+parser.add_argument('-f', '--frequency', type=int,
+                    help='enable sampling with frequency')
+parser.add_argument('--max-samples', type=int, default=2,
+                    help='max samples when sampling is enabled. 2 by default')
+parser.add_argument('--stack-storage-size', default=16384, type=int,
+                    help='stack storage size used in stack sampling, default '
+                         'to 16384')
 parser.add_argument('duration', type=int, nargs='?',
                      help='capture duration in seconds, use keyboard '
                           'interrput when not specified')
@@ -298,6 +338,10 @@ absolute_binary_path = None
 uprobe_pid = None
 max_namelen = 16
 max_commands = 16
+
+frequency = args.frequency
+sampling = bool(frequency)
+max_samples = args.max_samples if sampling else 0
 
 if args.binary_path and args.binary_path.is_absolute():
     absolute_binary_path = args.binary_path
@@ -345,6 +389,12 @@ class call_stats_t(ct.Structure):
         ('count',       ct.c_uint32),
     ]
 
+class sample_t(ct.Structure):
+    _fields_ = [
+        ('user_stack_id',   ct.c_int),
+        ('kernel_stack_id', ct.c_int),
+    ]
+
 class msg_t(ct.Structure):
     _fields_ = [
         ('tgid',        ct.c_uint32),
@@ -354,7 +404,9 @@ class msg_t(ct.Structure):
         ('oncpu_ns',    ct.c_uint64),
         ('sw',          ct.c_uint32),
         ('overflow',    ct.c_uint32),
+        ('hits',        ct.c_uint32),
         ('call_stats',  call_stats_t * max_commands),
+        ('samples',     sample_t * max_samples)
     ]
 
 
@@ -362,6 +414,8 @@ extra_defs = {
     'MINLAT': args.min_lat * 1000,
     'MAX_COMMANDS': max_commands,
     'MAX_NAMELEN': max_namelen,
+    'MAXSAMPLES': max_samples,
+    'STACK_STORAGE_SIZE': args.stack_storage_size,
     'FILTER_PID': 'if (tgid_pid>>32 != %d) return 0;' % pid if pid else "",
 }
 
@@ -388,24 +442,47 @@ b.attach_uretprobe(name=library,
                    sym='aeProcessEvents', fn_name="trace_loop_return")
 b.attach_uprobe(name=library, sym='call', fn_name="trace_call_entry")
 b.attach_uretprobe(name=library, sym='call', fn_name="trace_call_return")
+if sampling:
+    b.attach_perf_event(ev_type=PerfType.SOFTWARE,
+        ev_config=PerfSWConfig.CPU_CLOCK, fn_name="do_perf_event",
+        sample_freq=frequency)
 
-
-print("%15s %7s/%-7s %10s %10s %8s %8s" % (
-    'TIMESTAMP', 'PID', 'TID', 'LATENCY_MS', 'ONCPU_MS', 'SW', 'OVERFLOW'
+print("%15s %7s/%-7s %10s %10s %8s %8s %4s" % (
+    'TIMESTAMP', 'PID', 'TID', 'LATENCY_MS', 'ONCPU_MS', 'SW', 'OVERFLOW', 'HITS'
 ))
+
+
+def format_stack(pid, user_stack_id, kernel_stack_id):
+    stack_traces = b.get_table("stack_traces")
+    user_stack_str = ''
+    kernel_stack_str = ''
+    if user_stack_id > 0:
+        user_stack = list(stack_traces.walk(user_stack_id))
+        user_stack_str = '>'.join(
+            b.sym(addr, pid).decode('utf-8', 'replace') + ':' + hex(addr)
+            for addr in reversed(user_stack))
+
+    if kernel_stack_id > 0:
+        kernel_stack = list(stack_traces.walk(kernel_stack_id))
+        kernel_stack_str = '>'.join(
+            b.ksym(addr).decode('utf-8', 'replace')
+            for addr in reversed(kernel_stack)
+        )
+    return kernel_stack_str + '|' + user_stack_str
 
 
 def callback(cpu, data, size, timefmt="%H:%M:%S.%f"):
     event = ct.cast(data, ct.POINTER(msg_t)).contents
     latency = (event.stop_ns - event.start_ns) / 1000000
     oncpu = event.oncpu_ns / 1000000
-    print("%s %7d/%-7d %10.3f %10.3f %8d %8d" % (
+    print("%s %7d/%-7d %10.3f %10.3f %8d %8d %4d" % (
         datetime.datetime.fromtimestamp(clocktime(event.start_ns)).strftime(timefmt),
         event.tgid, event.pid,
         latency,
         oncpu,
         event.sw,
         event.overflow,
+        event.hits,
     ))
     try:
         command_info_table = b['command_info_table_map'][ct.c_uint32(event.pid)]
@@ -425,7 +502,14 @@ def callback(cpu, data, size, timefmt="%H:%M:%S.%f"):
               call_stats.count,
               call_stats.lat_sum_ns / 1000000,
               call_stats.lat_max_ns / 1000000,))
-        
+    
+    if sampling:
+        for i in range(min(max_samples, event.hits)):
+            sample = event.samples[i]
+            print(format_stack(event.pid,
+                               sample.user_stack_id,
+                               sample.kernel_stack_id))
+
 
 def _callback(cpu, data, size, **kw):
     # this wrapper is needed to avoid blocking of ctrl-c.
