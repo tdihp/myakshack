@@ -1,11 +1,11 @@
 #!/bin/bash
+# This script is similar to make-kubeconfig.sh, but is expected to be ran in
+# az aks command-invoke
+# we expect $1 to be cluster name (used in the kubeconfig yaml parts)
 
-# This script loosely follows
-# https://kubernetes.io/docs/reference/access-authn-authz/certificate-signing-requests/#normal-user
-# and generate a complete kubeconfig
+CLUSTER_NAME=$1
 
 openssl genrsa -out myuser.key 2048
-
 cat <<EOF | kubectl apply -f-
 apiVersion: certificates.k8s.io/v1
 kind: CertificateSigningRequest
@@ -21,23 +21,21 @@ EOF
 
 kubectl certificate approve myuser
 
-CURRENT_CONTEXT=`kubectl config current-context`
-CURRENT_CLUSTER=`kubectl config view -o jsonpath="{.contexts[?(@.name == \"$CURRENT_CONTEXT\")].context.cluster}"`
-
 cat <<EOF >kubeconfig
 apiVersion: v1
 kind: Config
-current-context: myuser_$CURRENT_CLUSTER
+current-context: myuser_$CLUSTER_NAME
 clusters:
-- `kubectl config view --raw -o jsonpath="{.clusters[?(@.name == \"$CURRENT_CLUSTER\")]}"`
+- name: $CLUSTER_NAME
+  cluster: {}
 users:
-- name: myuser_$CURRENT_CLUSTER
+- name: myuser_$CLUSTER_NAME
   user:
     client-certificate-data: `kubectl get csr myuser -o jsonpath='{.status.certificate}'`
     client-key-data: `<myuser.key base64 -w0`
 contexts:
-- name: myuser_$CURRENT_CLUSTER
+- name: myuser_$CLUSTER_NAME
   context:
-    cluster: $CURRENT_CLUSTER
-    user: myuser_$CURRENT_CLUSTER
+    cluster: $CLUSTER_NAME
+    user: myuser_$CLUSTER_NAME
 EOF
