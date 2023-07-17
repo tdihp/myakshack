@@ -5,6 +5,8 @@
 Ad-hoc script for identifying root cause direction of redis latency.
 This script captures each eventloop and count all calls inside.
 
+CAVEAT: only tested on x64 redis-server:5 without nested/multi call.
+
 EXAMPLES
 
 * Capture all redis-server process for 10 seconds, use default settings
@@ -24,7 +26,11 @@ CHANGELOG
 
 2023-07-05 Initial script
 2023-07-06 Add oncpu time and switch count, add --min-oncpu flag
-           Add perf sampling 
+           Add perf sampling
+2023-07-11 Moved start of call to processInlineBuffer/processMultibulkBuffer
+           Add command stats for argc, request size and response size.
+2023-07-17 Removed client header, use pahole to generate client definition
+           only on necessary members.
 
 Copyright (c) 2023, Ping He.
 License: MIT
@@ -34,10 +40,14 @@ import sys
 import time
 import datetime
 import threading
+import re
+import shutil
+from subprocess import check_output, PIPE
 from pathlib import Path
 import ctypes as ct
 from bcc import BPF, PerfType, PerfSWConfig
 
+HAS_PAHOLE = bool(shutil.which('pahole'))
 
 bpf_text = r'''
 #include <uapi/linux/ptrace.h>
@@ -51,32 +61,39 @@ struct redisCommand {
     int flags;
 };
 
-/* a copy from redis 5 */
-struct client {
-    uint64_t id;
-    int fd;
-    void *db;
-    void *name;
-    void *querybuf;
-    size_t qb_pos;
-    void *pending_querybuf;
-    size_t querybuf_peak;
-    int argc;
-    void *argv;
-    struct redisCommand *cmd;
-};
+#define OFF_MEMB(name, offset, member) \
+    struct __attribute__ ((__packed__)) {\
+        char __pad##name[offset];        \
+        member;                          \
+    }
+
+typedef union client {
+%(REDIS_CLIENT_OFF_MEMBS)s
+} client;
 
 %(EXTRA_MACROS)s
 
+/* TODO: we haven't considered nested calls (such as from nested) */
 struct call_state_t {
-    u64 start_ns;
-    u32 cmdid;
+    client *c;
+    u64 start_ns; /* collected in processInlineBuffer/processMultibulkBuffer */
+    size_t qb_pos; /* collected in processInlineBuffer/processMultibulkBuffer */
+    u32 cmdid; /* collected in call */
+    u32 argc; /* collected in call */
+    u32 bufpos; /* collected in call */
+    unsigned long long reply_bytes; /* collected in call */
 };
 
 struct call_stats_t {
     u64 lat_sum_ns;
     u64 lat_max_ns;
     u32 count;
+    u32 argc_sum;
+    u32 argc_max;
+    u32 rq_sum;
+    u32 rq_max;
+    u32 rp_sum;
+    u32 rp_max;
 };
 
 struct sample_t {
@@ -110,13 +127,6 @@ struct command_info_table_t {
     struct command_info_t command_info[MAX_COMMANDS];
 };
 
-
-BPF_HASH(command_index, struct command_key_t, u32);
-BPF_HASH(command_info_table_map, u32, struct command_info_table_t);
-BPF_HASH(loop_state_map, u32, struct loop_state_t);
-BPF_HASH(call_state_map, u32, struct call_state_t);
-BPF_STACK_TRACE(stack_traces, STACK_STORAGE_SIZE);
-
 struct msg_t {
     u32 tgid;
     u32 pid;
@@ -130,6 +140,17 @@ struct msg_t {
     struct sample_t samples[MAXSAMPLES];
 };
 
+union scratch_u {
+    struct loop_state_t loop_state;
+    struct msg_t msg;
+};
+
+BPF_PERCPU_ARRAY(scratch, union scratch_u, 1);
+BPF_HASH(command_index, struct command_key_t, u32);
+BPF_HASH(command_info_table_map, u32, struct command_info_table_t);
+BPF_HASH(loop_state_map, u32, struct loop_state_t);
+BPF_HASH(call_state_map, u32, struct call_state_t);
+BPF_STACK_TRACE(stack_traces, STACK_STORAGE_SIZE);
 BPF_PERF_OUTPUT(events);
 
 int trace_loop_entry(struct pt_regs *ctx)
@@ -139,8 +160,13 @@ int trace_loop_entry(struct pt_regs *ctx)
     u32 tgid = tgid_pid >> 32;
     u32 pid = tgid_pid;
     u64 now = bpf_ktime_get_ns();
-    struct loop_state_t state = {now, now};
-    loop_state_map.update(&pid, &state);
+    u32 zero = 0;
+    struct loop_state_t *loop_state = scratch.lookup(&zero);
+    if (!loop_state) return 0;
+    __builtin_memset(loop_state, 0, sizeof(struct loop_state_t));
+    loop_state->start_ns = now;
+    loop_state->sched_ns = now;
+    loop_state_map.update(&pid, loop_state);
     return 0;
 }
 
@@ -162,23 +188,62 @@ int trace_loop_return(struct pt_regs *ctx)
         goto recycle;
     }
 #endif
-    struct msg_t msg = {};
-    msg.tgid = tgid_pid >> 32;
-    msg.pid = pid;
-    msg.start_ns = loop_state->start_ns;
-    msg.stop_ns = now;
-    msg.oncpu_ns = loop_state->oncpu_ns;
-    msg.sw = loop_state->sw;
-    msg.overflow = loop_state->overflow;
-    msg.hits = loop_state->hits;
-    __builtin_memcpy(&msg.call_stats,
+    u32 zero = 0;
+    struct msg_t *msg = scratch.lookup(&zero);
+    if (!msg) return 0;
+    __builtin_memset(msg, 0, sizeof(struct msg_t));
+    msg->tgid = tgid_pid >> 32;
+    msg->pid = pid;
+    msg->start_ns = loop_state->start_ns;
+    msg->stop_ns = now;
+    msg->oncpu_ns = loop_state->oncpu_ns;
+    msg->sw = loop_state->sw;
+    msg->overflow = loop_state->overflow;
+    msg->hits = loop_state->hits;
+    __builtin_memcpy(&msg->call_stats,
                      &loop_state->call_stats,
-                     sizeof(msg.call_stats));
-    __builtin_memcpy(&msg.samples, &loop_state->samples, sizeof(msg.samples));
-    events.perf_submit(ctx, &msg, sizeof(msg));
+                     sizeof(msg->call_stats));
+    __builtin_memcpy(&msg->samples, &loop_state->samples, sizeof(msg->samples));
+    events.perf_submit(ctx, msg, sizeof(struct msg_t));
 recycle:
     loop_state_map.delete(&pid);
     return 0;
+}
+
+static inline u32 get_command_id(u32 pid, struct redisCommand *cmd) {
+    struct command_key_t command_key = {};
+    command_key.pid = pid;
+    command_key.cmd = cmd;
+    u32 *command_id_p = command_index.lookup(&command_key);
+    if (command_id_p) return *command_id_p;
+    struct command_info_table_t citzero = {};
+    struct command_info_table_t *command_info_table =
+        command_info_table_map.lookup_or_try_init(&pid, &citzero);
+    if (!command_info_table) return MAX_COMMANDS;
+    u32 command_id = command_info_table->count;
+    command_info_table->count += 1;
+    command_index.update(&command_key, &command_id);
+    if (command_id < MAX_COMMANDS) {
+        struct command_info_t *command_info = &command_info_table->command_info[command_id];
+        command_info->flags = cmd->flags;
+        bpf_probe_read_user_str(&command_info->name, MAX_NAMELEN, cmd->name);
+    }
+    return command_id;
+}
+
+int trace_process_buffer_entry(struct pt_regs *ctx)
+{
+    u64 tgid_pid = bpf_get_current_pid_tgid();
+    FILTER_PID;
+    u32 pid = tgid_pid;
+    client *c = (client *)PT_REGS_PARM1(ctx);
+    if (!c) return 0;
+    u64 now = bpf_ktime_get_ns();
+    struct call_state_t state = {};
+    state.c = c;
+    state.start_ns = now;
+    state.qb_pos = c->qb_pos;
+    call_state_map.update(&pid, &state);
 }
 
 int trace_call_entry(struct pt_regs *ctx)
@@ -186,38 +251,22 @@ int trace_call_entry(struct pt_regs *ctx)
     u64 tgid_pid = bpf_get_current_pid_tgid();
     FILTER_PID;
     u32 pid = tgid_pid;
-    struct client *c = (struct client *)PT_REGS_PARM1(ctx);
-    /* ensure the command is registered */
+    client *c = (client *)PT_REGS_PARM1(ctx);
     if (!c) return 0;
     struct redisCommand *cmd = c->cmd;
     if (!cmd) return 0;
-    struct command_key_t command_key = {};
-    command_key.pid = pid;
-    command_key.cmd = cmd;
-    u32 *command_id_p = command_index.lookup(&command_key);
-    u32 command_id = 0;
-    if (!command_id_p) {
-        struct command_info_table_t citzero = {};
-        struct command_info_table_t *command_info_table =
-            command_info_table_map.lookup_or_try_init(&pid, &citzero);
-        if (!command_info_table) return 0;
-        command_id = command_info_table->count;
-        command_info_table->count += 1;
-        command_index.update(&command_key, &command_id);
-        if (command_id < MAX_COMMANDS) {
-            struct command_info_t *command_info = &command_info_table->command_info[command_id];
-            command_info->flags = cmd->flags;
-            bpf_probe_read_user_str(&command_info->name, MAX_NAMELEN, cmd->name);
-        }
-    } else {
-        command_id = *command_id_p;
+    u32 command_id = get_command_id(pid, cmd);
+    struct call_state_t *call_state = call_state_map.lookup(&pid);
+    if (!call_state) return 0;
+    /* make sure we are using the same client, otherwise cleanup */
+    if (call_state->c != c) {
+        call_state_map.delete(&pid);
+        return 0;
     }
-    u64 now = bpf_ktime_get_ns();
-    /* struct call_state_t state = {now, command_id}; */
-    struct call_state_t state = {};
-    state.start_ns = now;
-    state.cmdid = command_id;
-    call_state_map.update(&pid, &state);
+    call_state->cmdid = command_id;
+    call_state->argc = c->argc;
+    call_state->bufpos = c->bufpos;
+    call_state->reply_bytes = c->reply_bytes;
     return 0;
 }
 
@@ -242,6 +291,22 @@ int trace_call_return(struct pt_regs *ctx)
             call_stats->lat_max_ns = dt;
         }
         call_stats->count++;
+        call_stats->argc_sum += call_state->argc;
+        if (call_state->argc > call_stats->argc_max) {
+            call_stats->argc_max = call_state->argc;
+        }
+        u32 rq = call_state->c->qb_pos - call_state->qb_pos;
+        call_stats->rq_sum += rq;
+        if (rq > call_stats->rq_max) {
+            call_stats->rq_max = rq;
+        }
+        u64 rp64 = call_state->c->reply_bytes - call_state->reply_bytes;
+        rp64 += (call_state->c->bufpos - call_state->bufpos);
+        u32 rp = rp64;
+        call_stats->rp_sum += rp;
+        if (rp > call_stats->rp_max) {
+            call_stats->rp_max = rp;
+        }
     }
     call_state_map.delete(&pid);
     return 0;
@@ -302,6 +367,36 @@ def discover_redis_server():
             yield pid
 
 
+def extract_member_detail_pahole(type_, path=None):
+    pahole_result = check_output(['pahole', path, '-C', type_],
+                                 encoding='utf-8')
+    pattern = re.compile(
+        r'(?P<mdef>(?P<mtype>((\w+|\*) )+) *(?P<mname>\w+)(\[(?P<marr>\d+)\])?); *\/\* *(?P<moffset>\d+) +(?P<msize>\d+) *\*\/'
+    )
+    for line in pahole_result.splitlines():
+        m = pattern.match(line.strip())
+        if not m:
+            continue
+
+        d = m.groupdict()
+        yield (
+            d['mdef'],
+            d['mname'],
+            d['mtype'].strip(),
+            int(d['marr']) if d['marr'] else None,
+            int(d['moffset']),
+        )
+
+
+def get_client_offset_members_pahole(path, want_members):
+    members = dict((mname, (mdef, offset))
+                   for mdef, mname, mtype, marr, offset
+                   in extract_member_detail_pahole('client', path))
+
+    for mname in want_members:
+        mdef, offset = members[mname]
+        yield 'OFF_MEMB(%s, %d, %s);' % (mname, offset, mdef)
+
 import argparse
 parser = argparse.ArgumentParser(
     description=__doc__,
@@ -328,10 +423,15 @@ parser.add_argument('--max-samples', type=int, default=2,
 parser.add_argument('--stack-storage-size', default=16384, type=int,
                     help='stack storage size used in stack sampling, default '
                          'to 16384')
+parser.add_argument("--ebpf", action="store_true",
+                    help=argparse.SUPPRESS)
 parser.add_argument('duration', type=int, nargs='?',
                      help='capture duration in seconds, use keyboard '
                           'interrput when not specified')
 args = parser.parse_args()
+
+if not HAS_PAHOLE:
+    raise RuntimeError('This script requires pahole to run.')
 
 pid = None
 absolute_binary_path = None
@@ -387,6 +487,12 @@ class call_stats_t(ct.Structure):
         ('lat_sum_ns',  ct.c_uint64),
         ('lat_max_ns',  ct.c_uint64),
         ('count',       ct.c_uint32),
+        ('argc_sum',    ct.c_uint32),
+        ('argc_max',    ct.c_uint32),
+        ('rq_sum',      ct.c_uint32),
+        ('rq_max',      ct.c_uint32),
+        ('rp_sum',      ct.c_uint32),
+        ('rp_max',      ct.c_uint32),
     ]
 
 class sample_t(ct.Structure):
@@ -422,7 +528,16 @@ extra_defs = {
 if args.min_oncpu:
     extra_defs['MINONCPU'] = args.min_oncpu * 1000
 
-bpf_text_rendered = bpf_text % {'EXTRA_MACROS': '\n'.join('#define %s %s' % pair for pair in extra_defs.items())}
+bpf_text_rendered = bpf_text % {
+    'EXTRA_MACROS': '\n'.join('#define %s %s' % pair for pair in extra_defs.items()),
+    'REDIS_CLIENT_OFF_MEMBS': '\n'.join(
+        get_client_offset_members_pahole(
+            absolute_binary_path,
+            ['qb_pos', 'cmd', 'argc', 'bufpos', 'reply_bytes']))}
+
+if args.ebpf:
+    print(bpf_text_rendered)
+    exit()
 
 b = BPF(text=bpf_text_rendered)
 first_ts = BPF.monotonic_time()
@@ -442,6 +557,10 @@ b.attach_uretprobe(name=library,
                    sym='aeProcessEvents', fn_name="trace_loop_return")
 b.attach_uprobe(name=library, sym='call', fn_name="trace_call_entry")
 b.attach_uretprobe(name=library, sym='call', fn_name="trace_call_return")
+b.attach_uprobe(name=library, sym='processInlineBuffer',
+                fn_name="trace_process_buffer_entry")
+b.attach_uprobe(name=library, sym='processMultibulkBuffer',
+                fn_name="trace_process_buffer_entry")
 if sampling:
     b.attach_perf_event(ev_type=PerfType.SOFTWARE,
         ev_config=PerfSWConfig.CPU_CLOCK, fn_name="do_perf_event",
@@ -490,19 +609,30 @@ def callback(cpu, data, size, timefmt="%H:%M:%S.%f"):
         # maybe into table is not ready (?)
         return
 
-    for i, (command_info, call_stats) in enumerate(zip(command_info_table.command_info, event.call_stats)):
-        if i >= command_info_table.count:
-            break
+    stat_entries = list(
+        (command_info, call_stats)
+        for i, (command_info, call_stats)
+        in enumerate(zip(command_info_table.command_info, event.call_stats))
+        if i < command_info_table.count and call_stats.count > 0)
 
-        if call_stats.count == 0:
-            continue
-        
-        print("%16s %6d %10.3f %10.3f" % (
-              command_info.name.decode('utf8'),
-              call_stats.count,
-              call_stats.lat_sum_ns / 1000000,
-              call_stats.lat_max_ns / 1000000,))
-    
+    if stat_entries:
+        print ('%16s %6s %10s %10s %6s %6s %9s %9s %9s %9s' % 
+               ('CMD', 'CALLS', 'LATSUM_MS', 'LATMAX_MS',
+                'ARGSUM', 'ARGMAX', 'RQSUM', 'RQMAX', 'RPSUM', 'RPMAX'))
+        for command_info, call_stats in stat_entries:
+            print("%16s %6d %10.3f %10.3f %6d %6d %9d %9d %9d %9d" % (
+                command_info.name.decode('utf8'),
+                call_stats.count,
+                call_stats.lat_sum_ns / 1000000,
+                call_stats.lat_max_ns / 1000000,
+                call_stats.argc_sum,
+                call_stats.argc_max,
+                call_stats.rq_sum,
+                call_stats.rq_max,
+                call_stats.rp_sum,
+                call_stats.rp_max
+            ))
+
     if sampling:
         for i in range(min(max_samples, event.hits)):
             sample = event.samples[i]
