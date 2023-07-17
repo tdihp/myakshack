@@ -1,4 +1,4 @@
-# MNCNI -- My Naive CNI for AKS (in progress)
+# MNCNI -- My Naive CNI for AKS
 
 This is an experimental effort for customizations of CNI on AKS with the byo CNI
 feature. This article will be scoped to Linux only, while for most parts Windows
