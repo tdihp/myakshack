@@ -373,8 +373,12 @@ def extract_member_detail_pahole(type_, path=None):
     # pahole v1.21 checks isatty(stdin) to determine if it is pretty printing.
     # Allocate pseudo tty to be compatible.
     # Noting it is not necessary for v1.22 and above.
-    pahole_result = check_output(['pahole', path, '-C', type_],
-                                 stdin=pty_b, encoding='utf-8')
+    try:
+        pahole_result = check_output(['pahole', path, '-C', type_],
+                                    stdin=pty_b, encoding='utf-8')
+    finally:
+        os.close(pty_a), os.close(pty_b)
+
     pattern = re.compile(
         r'(?P<mdef>(?P<mtype>((\w+|\*) )+) *(?P<mname>\w+)(\[(?P<marr>\d+)\])?); *\/\* *(?P<moffset>\d+) +(?P<msize>\d+) *\*\/'
     )
