@@ -31,6 +31,7 @@ CHANGELOG
            Add command stats for argc, request size and response size.
 2023-07-17 Removed client header, use pahole to generate client definition
            only on necessary members.
+2023-07-24 Fix compatibility issue when using nohup with pahole v1.21
 
 Copyright (c) 2023, Ping He.
 License: MIT
@@ -368,8 +369,12 @@ def discover_redis_server():
 
 
 def extract_member_detail_pahole(type_, path=None):
+    pty_a, pty_b = os.openpty()
+    # pahole v1.21 checks isatty(stdin) to determine if it is pretty printing.
+    # Allocate pseudo tty to be compatible.
+    # Noting it is not necessary for v1.22 and above.
     pahole_result = check_output(['pahole', path, '-C', type_],
-                                 encoding='utf-8')
+                                 stdin=pty_b, encoding='utf-8')
     pattern = re.compile(
         r'(?P<mdef>(?P<mtype>((\w+|\*) )+) *(?P<mname>\w+)(\[(?P<marr>\d+)\])?); *\/\* *(?P<moffset>\d+) +(?P<msize>\d+) *\*\/'
     )
