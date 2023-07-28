@@ -3,10 +3,12 @@
 set -xe
 
 az group create -l "$REGION" -n "$AKSRG"
-# az aks create -l "$REGION" -g "$AKSRG" -n "$AKSNAME" -c 1 \
-#     --enable-managed-identity \
-#     --enable-workload-identity \
-#     --enable-oidc-issuer
+
+az aks show -otable -g "$AKSRG" -n "$AKSNAME" || \
+az aks create -l "$REGION" -g "$AKSRG" -n "$AKSNAME" -c 1 \
+    --enable-managed-identity \
+    --enable-workload-identity \
+    --enable-oidc-issuer
 
 # https://learn.microsoft.com/en-us/azure/aks/use-oidc-issuer#show-the-oidc-issuer-url
 OIDC_ISSUER=`az aks show -g "$AKSRG" -n "$AKSNAME" --query "oidcIssuerProfile.issuerUrl" -otsv`
@@ -24,7 +26,6 @@ kubectl apply -f- <<EOF
             azure.workload.identity/client-id: "$APP_ID"
 EOF
 
-
 FED_REQ=$(
 cat <<EOF
 {
@@ -38,6 +39,9 @@ cat <<EOF
 }
 EOF
 )
-# az ad app federated-credential create --id $APPLICATION_OBJECT_ID --parameters "$FED_REQ"
+if [[ `az ad app federated-credential list --id $APPLICATION_OBJECT_ID -o tsv | wc -l` == 0 ]]; then
+    az ad app federated-credential create --id $APPLICATION_OBJECT_ID --parameters "$FED_REQ"
+fi
 az group create -l "$REGION" -n "$DESTRG"
+az ad sp create --id "$APP_ID"
 az role assignment create --role "Contributor" --assignee "$APP_ID" -g "$DESTRG"
