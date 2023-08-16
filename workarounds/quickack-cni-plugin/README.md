@@ -5,6 +5,18 @@ network.
 
 Tested on AKS Azure CNI configuration.
 
+## Detecting delayed ack
+
+It is possible by using ebpf. See
+[trace_delayed_acks.py](./trace_delayed_acks.py) for a working tracing script,
+that prints tcp_send_delayed_ack timings, to be able to match what's observed
+in tcpdump.
+
+## Reproduction
+
+See [delayed-ack-repro](./delayed-ack-repro) directory for a full reproduction.
+use deploy.sh and cleanup.sh to install/remove the repro app.
+
 ## Installation
 
 ```

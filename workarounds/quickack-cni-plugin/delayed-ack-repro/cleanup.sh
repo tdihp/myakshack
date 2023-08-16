@@ -1,0 +1,1 @@
+kubectl delete -l app=ballgame configmap,deployment,service
