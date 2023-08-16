@@ -36,7 +36,7 @@ spec:
       containers:
       - name: ballgameserver
         image: python:3-slim
-        command: ['python', 'ballgame.py', 'server']
+        command: ['python', 'ballgame.py', '-v','server']
         volumeMounts:
         - name: ballgame
           mountPath: /opt/workdir 
@@ -88,7 +88,7 @@ spec:
       containers:
       - name: ballgameclient
         image: python:3-slim
-        command: ['python', 'ballgame.py', '--nagle',
+        command: ['python', 'ballgame.py', '-v', '--nagle',
                   'client', 'ballgameserver',
                   '--total=0', '--latms=1',
                   '--pings=2', '--pongs=2', '--loops=10']
