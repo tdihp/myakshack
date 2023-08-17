@@ -14,7 +14,6 @@ import socket
 import time
 import datetime
 import threading
-import ctypes as ct
 from bcc import BPF
 
 
