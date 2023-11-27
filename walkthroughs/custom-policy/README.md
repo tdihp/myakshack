@@ -26,7 +26,7 @@ To install latest Gator on Linux at momemnt of writing:
 
 Find a policy directory in `policies` directory, copy and rename.
 
-### Step2: Update polciy details
+### Step2: Update policy details
 
 Including below details:
 
