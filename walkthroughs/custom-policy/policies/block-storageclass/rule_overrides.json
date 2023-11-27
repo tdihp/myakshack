@@ -1,0 +1,4 @@
+{
+    "apiGroups": [""],
+    "kinds": ["PersistentVolumeClaim"]
+}

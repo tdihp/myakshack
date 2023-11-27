@@ -1,0 +1,19 @@
+kind: Suite
+apiVersion: test.gatekeeper.sh/v1alpha1
+tests:
+- name: allowed-storageclass
+  template: template.yaml
+  constraint: samples/constraint.yaml
+  cases:
+  - name: working
+    object: samples/working.yaml
+    assertions:
+    - violations: no
+  - name: blocked1
+    object: samples/blocked1.yaml
+    assertions:
+    - violations: yes
+  - name: blocked2
+    object: samples/blocked2.yaml
+    assertions:
+    - violations: yes

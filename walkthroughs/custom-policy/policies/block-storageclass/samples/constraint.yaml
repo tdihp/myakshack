@@ -1,0 +1,14 @@
+apiVersion: constraints.gatekeeper.sh/v1beta1
+kind: k8sblockstorageclass
+metadata:
+  name: k8sblockstorageclass
+spec:
+  match:
+    kinds:
+      - apiGroups: [""]
+        kinds: ["PersistentVolumeClaim"]
+    namespaces: []
+  parameters:
+    blockedStorageClasses:
+      - "blocked1"
+      - "blocked2"

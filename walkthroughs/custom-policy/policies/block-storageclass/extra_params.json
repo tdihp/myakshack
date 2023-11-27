@@ -1,0 +1,10 @@
+{
+  "blockedStorageClasses": {
+    "type": "Array",
+    "metadata": {
+      "displayName": "StorageClass exclusions",
+      "description": "The list of storage classes will be blocked."
+    },
+    "defaultValue": []
+  }
+}

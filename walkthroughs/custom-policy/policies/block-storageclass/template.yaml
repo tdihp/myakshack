@@ -1,0 +1,28 @@
+apiVersion: templates.gatekeeper.sh/v1beta1
+kind: ConstraintTemplate
+metadata:
+  name: k8sblockstorageclass
+spec:
+  crd:
+    spec:
+      names:
+        kind: k8sblockstorageclass
+      validation:
+        openAPIV3Schema:
+          properties:
+            blockedStorageClasses:
+              type: array
+              items:
+                type: string
+  targets:
+    - target: admission.k8s.gatekeeper.sh
+      rego: |
+        package k8sblockstorageclass
+
+        violation[{"msg": msg}] {
+          storageclass := input.review.object.spec.storageClassName
+          excluded := input.parameters.blockedStorageClasses
+          storageclass == excluded[i]
+          msg := sprintf("PVC <%s> has disallowed storage class <%s>",
+                         [input.review.object.metadata.name, storageclass])
+        }

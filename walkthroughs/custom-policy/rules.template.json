@@ -1,0 +1,24 @@
+{
+  "if": {
+    "field": "type",
+    "in": [
+      "Microsoft.Kubernetes/connectedClusters",
+      "Microsoft.ContainerService/managedClusters"
+    ]
+  },
+  "then": {
+    "effect": "[parameters('effect')]",
+    "details": {
+      "templateInfo": {
+        "sourceType": "Base64Encoded",
+        "content": ""
+      },
+      "apiGroups": [],
+      "kinds": [],
+      "excludedNamespaces": "[parameters('excludedNamespaces')]",
+      "namespaces": "[parameters('namespaces')]",
+      "labelSelector": "[parameters('labelSelector')]",
+      "values": {}
+    }
+  }
+}
