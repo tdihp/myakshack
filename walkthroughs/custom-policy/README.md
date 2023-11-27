@@ -1,7 +1,10 @@
 # Samples and scripts for working with Azure Kubernetes Custom Policy
 
 This directory contains example and scripts for building and publishing Azure
-Policy definitions of custom Kubernetes policies.
+Policy definitions of custom Kubernetes policies. The intent is to showcase
+the walkthrough of creating a Kubernetes Custom Policy from scratch, while try
+to move away some distractions dealing with the full Azure policy json
+definition.
 
 ## Workflow of adding a new policy
 
@@ -29,7 +32,9 @@ Including below details:
 
 * `extra_params.json`: All input parameters that will show in portal.
 * `rule_overrides.json`: Overriding `.then.details` of `rules.template.json`,
-  mainly used for specifying `apiGroups` and `kinds`.
+  mainly used for specifying `apiGroups` and `kinds`. There is no need to
+  update `then.details.values`, as all parameters in `extra_params.json` will be
+  populated here.
 * `template.yaml`: Speicifying the
   [OPA constraint template](https://open-policy-agent.github.io/gatekeeper/website/docs/constrainttemplates),
   including the embedded [rego script]https://www.openpolicyagent.org/docs/latest/policy-reference/).
