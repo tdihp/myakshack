@@ -117,11 +117,9 @@ proxy. This cannot capture traffic to/from apiserver without
 disabling TLS validation in AKS either, since Kubernetes components explicitly
 validates a self-signed certificate**.
 
-**NOTE:
-[http proxy support in AKS](https://learn.microsoft.com/en-us/azure/aks/http-proxy)
+**NOTE:[http proxy support in AKS](https://learn.microsoft.com/en-us/azure/aks/http-proxy)
 Should also work well with mitmproxy, although this article will devote in
-situation where http proxy support is not enabled.
-**
+situation where http proxy support is not enabled.**
 
 We use a transparent approach here just to be able to demonstrate capturing
 different components at the same time:
