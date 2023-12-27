@@ -1,25 +1,15 @@
 # Mitmproxy on Components of AKS
 
 [Mitmproxy](https://docs.mitmproxy.org/) is a great tool on sniffing http(s)
-connections. Sometimes such approach is necessary due to limitations causing
-unclear reason of failed api calls, while most http(s) clients are compatible
-with http_proxy and https_proxy environemnt variables.
+connections. Sometimes such approach is necessary to investigate failed https
+calls, since unfortunately not all applications are built with api auditing
+capabilities, while most http(s) clients are compatible of taking http_proxy and
+https_proxy environemnt variables.
 
 This walkthrough guides several common scenarios:
 
 1. Capturing https traffic of a modifiable pod;
 2. Capturing https traffic of Kubernetes node components.
-
-We won't cover how to review mitmproxy outputs in this walkthrough. Exploring
-by simply trying it out is recommended.
-
-We are only going to go through regular proxy use cases, not transparent proxy.
-This is because transparent proxy requires similar amount of work, while regular
-proxy mode gives more room for explicit control. Noting the only drawback is
-that we won't be able to capture without restarting the application. If no
-restarting is important, follow 
-[here](https://docs.mitmproxy.org/stable/howto-transparent/) in addition to what
-we learned.
 
 ## Capturing https traffic of a pod
 
@@ -117,6 +107,39 @@ TBD
 
 ## Capturing https traffic of Kubernetes node components
 
-TBD
-<!-- This part is specific to AKS. Follow [env.sh](./env.sh) and
-[provision.sh](./provision.sh) -->
+What happens if you want to capture traffic to see what's going on in container
+registry authentication, or image pulling, or for authenticating to the cloud
+(such as authenticating with a Service Principal)? Mitmproxy can do it.
+
+**Caveat: this approach is only intended as a demonstration. In real acpture
+scenario, you may want even more fine grained control on what to be passed to
+proxy. This cannot capture traffic to/from apiserver without
+disabling TLS validation in AKS either, since Kubernetes components explicitly
+validates a self-signed certificate**.
+
+**NOTE:
+[http proxy support in AKS](https://learn.microsoft.com/en-us/azure/aks/http-proxy)
+Should also work well with mitmproxy, although this article will devote in
+situation where http proxy support is not enabled.
+**
+
+We use a transparent approach here just to be able to demonstrate capturing
+different components at the same time:
+
+* All outbound traffics are by default routed to the proxy VM by UDR
+* The proxy VM is configured with IP forwarding both on nic and in kernel.
+  By default all traffics will be passed to destination without further
+  inspection.
+* Start mitmproxy on proxy VM (or any of the alternating commands).
+* VMSS nodes that needs capture will need to install the mitmpoxy's TLS cert.
+* On the proxy VM, Configure iptables nat rule to conditionally forward HTTPS
+  traffic to mitmproxy.
+
+### Step 1: Deploy AKS environment, and the proxy as external VM
+
+With this repository & directory as bash cwd, run `provision.sh`
+
+### Step 2: Follow instruction in `access-instructions.md`
+
+The instructions will guide you in final touches needed for deploying the
+proxied configuration.

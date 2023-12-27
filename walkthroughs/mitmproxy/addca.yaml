@@ -1,0 +1,136 @@
+apiVersion: apps/v1
+kind: DaemonSet
+metadata:
+  name: addca-ubuntu
+spec:
+  selector:
+    matchLabels:
+      name: addca-ubuntu
+  template:
+    metadata:
+      labels:
+        name: addca-ubuntu
+    spec:
+      hostNetwork: true
+      hostPID: true
+      enableServiceLinks: false
+      automountServiceAccountToken: false
+      terminationGracePeriodSeconds: 5
+      nodeSelector:
+        kubernetes.azure.com/os-sku: Ubuntu
+      tolerations:
+      - key: CriticalAddonsOnly
+        operator: Exists
+      - effect: NoExecute
+        operator: Exists
+      - effect: NoSchedule
+        operator: Exists
+      containers:
+      - name: busybox
+        image: busybox
+        volumeMounts:
+        - mountPath: /host
+          name: host-root
+        command:
+        - chroot
+        - /host
+        - bash
+        - -exc
+        - |
+          if [ ! -f /usr/local/share/ca-certificates/mitmproxy.crt ]; then
+            curl http://mitm.it/cert/pem -o /usr/local/share/ca-certificates/mitmproxy.crt
+            update-ca-certificates
+            # containerd seems needing to restart for passing mitm cert
+            systemctl restart containerd.service
+          fi
+          sleep infinity
+      volumes:
+      - hostPath:
+          path: /
+          type: ""
+        name: host-root
+---
+apiVersion: apps/v1
+kind: DaemonSet
+metadata:
+  name: addca-azurelinux
+spec:
+  selector:
+    matchLabels:
+      name: addca-azurelinux
+  template:
+    metadata:
+      labels:
+        name: addca-azurelinux
+    spec:
+      hostNetwork: true
+      hostPID: true
+      enableServiceLinks: false
+      automountServiceAccountToken: false
+      terminationGracePeriodSeconds: 5
+      nodeSelector:
+        kubernetes.azure.com/os-sku: AzureLinux
+      tolerations:
+      - key: CriticalAddonsOnly
+        operator: Exists
+      - effect: NoExecute
+        operator: Exists
+      - effect: NoSchedule
+        operator: Exists
+      containers:
+      - name: busybox
+        image: busybox
+        volumeMounts:
+        - mountPath: /host
+          name: host-root
+        command:
+        - chroot
+        - /host
+        - bash
+        - -exc
+        - |
+          if [ ! -f /etc/pki/ca-trust/source/anchors/mitmproxy.crt ]; then
+            curl http://mitm.it/cert/pem -o /etc/pki/ca-trust/source/anchors/mitmproxy.crt
+            update-ca-trust
+            systemctl restart containerd.service
+          fi
+          sleep infinity
+      volumes:
+      - hostPath:
+          path: /
+          type: ""
+        name: host-root
+---
+apiVersion: apps/v1
+kind: DaemonSet
+metadata:
+  name: addca-windows
+spec:
+  selector:
+    matchLabels:
+      name: addca-windows
+  template:
+    metadata:
+      labels:
+        name: addca-windows
+    spec:
+      hostNetwork: true
+      enableServiceLinks: false
+      automountServiceAccountToken: false
+      terminationGracePeriodSeconds: 5
+      nodeSelector:
+        kubernetes.io/os: windows
+      securityContext:
+        windowsOptions:
+          hostProcess: true
+          runAsUserName: "NT AUTHORITY\\SYSTEM"
+      containers:
+      - name: powershell
+        image: mcr.microsoft.com/powershell:lts-nanoserver-ltsc2022
+        command:
+          - C:\Windows\System32\WindowsPowerShell\v1.0\powershell.exe
+          - -command
+          - |
+            curl.exe http://mitm.it/cert/pem -o /mitmproxy.crt
+            certutil -addstore root /mitmproxy.crt
+            Start-Sleep -Seconds 2147483

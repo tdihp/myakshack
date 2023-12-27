@@ -1,0 +1,41 @@
+Provisioning succeeded!
+
+To access the proxy VM, on a machine with browser, run:
+
+```
+ssh ubuntu@$PIP_ADDR -L 8081:127.0.0.1:8081
+```
+
+To visit the mitmweb, open http://127.0.0.1:8081 in your browser.
+
+To access the AKS cluster via kubectl:
+
+```
+export KUBECONFIG="$KUBECONFIG"
+```
+
+To access AKS nodes via ssh:
+
+```
+ssh -J ubuntu@$PIP_ADDR azureuser@10.1.0.4
+```
+
+To install mitmproxy certificate on all nodes
+
+```
+kubectl apply -f addca.yaml
+kubectl rollout status ds/addca-ubuntu
+kubectl rollout status ds/addca-azurelinux
+kubectl rollout status ds/addca-windows
+```
+
+Finally, to proxy all traffic other than apiserver communications
+
+```
+sudo iptables -t nat -A PREROUTING -d $APISERVER_IP -j ACCEPT
+sudo iptables -t nat -A PREROUTING -s $LAB_AKS_SUBNET_CIDR -j MITMPROXY
+# you can pinpoint what traffic to be routed to proxy, such as:
+#  sudo iptables -t nat -A PREROUTING -s $LAB_AKS_SUBNET_CIDR -d <some-remote-ip/cidr> -j MITMPROXY
+```
+
+Now apply some pods, and you shall see traffic coming showing in browser.

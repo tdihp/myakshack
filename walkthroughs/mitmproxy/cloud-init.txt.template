@@ -1,0 +1,70 @@
+#cloud-config
+package_upgrade: true
+packages:
+  - mitmproxy
+write_files:
+  - path: /etc/systemd/user/mitmweb.service
+    owner: root:root
+    permissions: '0644'
+    content: |
+      [Unit]
+      Description=mitmweb
+      After=network-online.target
+
+      [Service]
+      Type=exec
+      ExecStart=/usr/bin/mitmweb --mode transparent
+      Restart=always
+      Slice=system.slice
+
+      [Install]
+      WantedBy=multi-user.target
+  - path: /etc/systemd/user/mitm-iptables.service
+    owner: root:root
+    permissions: '0644'
+    content: |
+      [Unit]
+      Description=mitmweb iptables rules
+      After=network-online.target
+
+      [Service]
+      Type=oneshot
+      ExecStart=/usr/sbin/iptables-restore /usr/local/etc/mitm.iptables
+      # ExecStart=/usr/sbin/ip6tables-restore /usr/local/etc/mitm.iptables
+      Restart=no
+      Slice=system.slice
+
+      [Install]
+      WantedBy=multi-user.target
+  - path: /usr/local/etc/mitm.iptables
+    owner: root:root
+    permissions: '0644'
+    content: |
+      # both v4 and v6 can use the same thing
+      *nat
+      :PREROUTING ACCEPT [0:0]
+      :INPUT ACCEPT [0:0]
+      :OUTPUT ACCEPT [0:0]
+      :POSTROUTING ACCEPT [0:0]
+      :MITMPROXY - [0:0]
+      -A PREROUTING -m addrtype --src-type LOCAL -j ACCEPT
+      -A PREROUTING -m addrtype --dst-type LOCAL -j ACCEPT
+      -A PREROUTING -d $LAB_MITM_MAGIC_IP -j MITMPROXY
+      -A MITMPROXY -i eth0 -p tcp -m tcp --dport 80 -j REDIRECT --to-ports 8080
+      -A MITMPROXY -i eth0 -p tcp -m tcp --dport 443 -j REDIRECT --to-ports 8080
+      # finally we masq all non-local traffic
+      -A POSTROUTING -m addrtype ! --src-type LOCAL ! --dst-type LOCAL -j MASQUERADE
+      COMMIT
+  - path: /etc/sysctl.d/mitm.conf
+    owner: root:root
+    permissions: '0644'
+    content: |
+      net.ipv4.ip_forward=1
+      net.ipv6.conf.all.forwarding=1
+      net.ipv4.conf.all.send_redirects=0
+runcmd:
+  - systemctl enable /etc/systemd/user/mitm-iptables.service
+  - systemctl enable /etc/systemd/user/mitmweb.service
+  - systemctl start --no-block mitm-iptables.service
+  - systemctl start --no-block mitmweb.service
+  - sysctl --system
