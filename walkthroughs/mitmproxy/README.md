@@ -64,6 +64,7 @@ bundle to replace.
 
 ```shell
 kubectl run -it --rm --restart=Never --image=mcr.microsoft.com/azure-cli azure-cli -- bash -c '
+apk add curl
 curl --proxy http://mitmproxy:8080 http://mitm.it/cert/pem -o /usr/local/share/ca-certificates/mitmproxy.crt
 update-ca-certificates
 export https_proxy=http://mitmproxy:8080
