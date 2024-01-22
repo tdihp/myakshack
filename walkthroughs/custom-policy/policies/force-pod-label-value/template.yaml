@@ -1,0 +1,39 @@
+apiVersion: templates.gatekeeper.sh/v1beta1
+kind: ConstraintTemplate
+metadata:
+  name: k8sforcepodlabelvalue
+spec:
+  crd:
+    spec:
+      names:
+        kind: k8sforcepodlabelvalue
+      validation:
+        openAPIV3Schema:
+          properties:
+            requiredLabels:
+              type: array
+              items:
+                type: string
+  targets:
+    - target: admission.k8s.gatekeeper.sh
+      rego: |
+        package k8sforcepodlabelvalue
+
+        violation[{"msg": msg}] {
+          required := input.parameters.requiredLabels[_]
+          required_split := split(required, "=")
+          required_key := required_split[0]
+          not input.review.object.metadata.labels[required_key]
+          msg := sprintf("Pod <%s/%s> doesn't have label <%s>",
+                         [input.review.object.metadata.namespace, input.review.object.metadata.name, required_key])
+        }
+
+        violation[{"msg": msg}] {
+          required := input.parameters.requiredLabels[_]
+          required_split := split(required, "=")
+          required_key := required_split[0]
+          required_value_pattern := required_split[1]
+          not regex.match(required_value_pattern, input.review.object.metadata.labels[required_key])
+          msg := sprintf("Pod <%s/%s> doesn't meet all label requirements, failed on label <%s>",
+                         [input.review.object.metadata.namespace, input.review.object.metadata.name, required])
+        }

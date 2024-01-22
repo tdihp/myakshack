@@ -1,0 +1,10 @@
+{
+  "requiredLabels": {
+    "type": "Array",
+    "metadata": {
+      "displayName": "required labels",
+      "description": "required pod labels in <name>=<regexpattern> format."
+    },
+    "defaultValue": []
+  }
+}

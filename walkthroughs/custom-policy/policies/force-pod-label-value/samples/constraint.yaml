@@ -1,0 +1,14 @@
+apiVersion: constraints.gatekeeper.sh/v1beta1
+kind: k8sforcepodlabelvalue
+metadata:
+  name: k8sforcepodlabelvalue
+spec:
+  match:
+    kinds:
+      - apiGroups: [""]
+        kinds: ["Pod"]
+    namespaces: []
+  parameters:
+    requiredLabels:
+      - "env=^(test|prod)$"
+      - "owner=^(alice|bob)$"

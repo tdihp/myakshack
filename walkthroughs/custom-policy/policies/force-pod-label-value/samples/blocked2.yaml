@@ -1,0 +1,10 @@
+# this fails because it doesn't contain right value for all labels
+apiVersion: v1
+kind: Pod
+metadata:
+  labels:
+    env: prod
+    owner: john
+    foo: bar
+  name: foobartest
+  namespace: default
