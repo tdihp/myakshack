@@ -18,7 +18,7 @@ License: MIT
 build_policy () {
     policy_name="$1"
     echo "building policy $policy_name"
-    <policies/block-storageclass/template.yaml base64 -w0 | jq -R '.' | \
+    <"policies/$policy_name/template.yaml" base64 -w0 | jq -R '.' | \
         cat rules.template.json \
             "policies/$policy_name/rule_overrides.json" \
             "policies/$policy_name/extra_params.json" \
