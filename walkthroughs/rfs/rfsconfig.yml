@@ -1,0 +1,44 @@
+apiVersion: apps/v1
+kind: DaemonSet
+metadata:
+  name: rfsconfig
+  labels:
+    app: rfsconfig
+spec:
+  selector:
+    matchLabels:
+      app: rfsconfig
+  template:
+    metadata:
+      labels:
+        app: rfsconfig
+    spec:
+      hostNetwork: true
+      hostPID: true
+      enableServiceLinks: false
+      dnsPolicy: Default
+      automountServiceAccountToken: false
+      nodeSelector:
+        kubernetes.azure.com/agentpool: workpool
+      containers:
+      - name: rfsconfig
+        image: library/alpine:3.20
+        securityContext:
+          privileged: true
+        command:
+        - chroot
+        - /host
+        - bash
+        - -c
+        - $(rfsconfig.sh)
+        envFrom:
+        - configMapRef:
+            name: rfsconfig
+        volumeMounts:
+        - name: root
+          mountPath: /host
+          mountPropagation: HostToContainer
+      volumes:
+        - name: root
+          hostPath:
+            path: /

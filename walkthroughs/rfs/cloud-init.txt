@@ -1,0 +1,6 @@
+#cloud-config
+package_upgrade: true
+packages:
+  - apache2-utils
+  - iperf3
+

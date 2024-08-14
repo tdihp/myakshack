@@ -1,0 +1,40 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: nginx
+  labels:
+    app: nginx
+spec:
+  replicas: 1
+  strategy:
+    # So I can test this out on small nodes
+    type: Recreate
+  selector:
+    matchLabels:
+      app: nginx
+  template:
+    metadata:
+      labels:
+        app: nginx
+    spec:
+      enableServiceLinks: false
+      automountServiceAccountToken: false
+      nodeSelector:
+        kubernetes.azure.com/agentpool: workpool
+      terminationGracePeriodSeconds: 3
+      containers:
+      - name: nginx
+        image: library/nginx:1.27
+        ports:
+        - containerPort: 8080
+        env:
+        # nginx will mark worker_processes according to cgroup config
+        - name: NGINX_ENTRYPOINT_WORKER_PROCESSES_AUTOTUNE
+          value: "1"
+        resources:
+          requests:
+            memory: "512Mi"
+            cpu: "1"
+          limits:
+            memory: "512Mi"
+            cpu: "1"

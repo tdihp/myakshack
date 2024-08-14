@@ -1,0 +1,44 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: stress
+  labels:
+    app: stress
+spec:
+  replicas: 1
+  strategy:
+    # So I can test this out on small nodes
+    type: Recreate
+  selector:
+    matchLabels:
+      app: stress
+  template:
+    metadata:
+      labels:
+        app: stress
+    spec:
+      enableServiceLinks: false
+      automountServiceAccountToken: false
+      nodeSelector:
+        kubernetes.azure.com/agentpool: stresspool
+      terminationGracePeriodSeconds: 3
+      affinity:
+        podAntiAffinity:
+          requiredDuringSchedulingIgnoredDuringExecution:
+          - labelSelector:
+              matchExpressions:
+              - key: app
+                operator: In
+                values:
+                - stress
+            topologyKey: "kubernetes.io/hostname"
+      containers:
+      - name: stress
+        image: library/debian:bookworm
+        command:
+        - bash
+        - -c
+        - $(stress.sh)
+        envFrom:
+        - configMapRef:
+            name: stress

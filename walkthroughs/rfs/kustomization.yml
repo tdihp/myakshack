@@ -1,0 +1,40 @@
+
+configurations:
+- kconfigns.yml
+namespace: default
+resources:
+- monitoring/prom-sa.yml
+- monitoring/prom-deploy.yml
+- monitoring/prom-svc.yml
+- monitoring/node-exporter.yml
+- monitoring/prom-clusterrole.yml
+- monitoring/prom-clusterrolebinding.yml
+- nginx/nginx-deploy.yml
+- nginx/nginx-svc.yml
+- stress/stress-deploy.yml
+- rfsconfig.yml
+replicas:
+- name: nginx
+  count: 3
+- name: stress
+  count: 4
+configMapGenerator:
+- name: prom-conf
+  files:
+  - monitoring/prometheus.yml
+- name: rfsconfig
+  files:
+  - rfsconfig.sh
+  literals:
+  - CONFIGURE_VM=vanilla
+  # - CONFIGURE_VM=rfs
+  # - CONFIGURE_VM=rfs-noirqbalance
+  # - CONFIGURE_VM=arfs
+  - METRIC_PATH=/run/text-metrics
+- name: stress
+  files:
+  - stress/stress.sh
+  literals:
+  - "AB_ARGS=-q -k -c1 -s2 -n 100000"
+  # stress all if not provided
+  - "STRESS_FIRSTN=1"
