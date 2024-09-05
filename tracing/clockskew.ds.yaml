@@ -1,0 +1,48 @@
+# This is a daemonset that periodically checks ntp server(s) for detecting
+# VM's clock skew with sntp command.
+# To identify a node that might have high skew, run this daemonset, and check
+# logs of each pod.
+apiVersion: apps/v1
+kind: DaemonSet
+metadata:
+  name: clockskew-ds
+  namespace: kube-system
+  labels:
+    app: clockskew
+spec:
+  selector:
+    matchLabels:
+      app: clockskew
+  template:
+    metadata:
+      labels:
+        app: clockskew
+    spec:
+      terminationGracePeriodSeconds: 1
+      affinity:
+        nodeAffinity:
+          requiredDuringSchedulingIgnoredDuringExecution:
+            nodeSelectorTerms:
+            - matchExpressions:
+              - key: kubernetes.io/os
+                operator: In
+                values:
+                - linux
+      tolerations:
+      - operator: Exists
+        effect: NoSchedule
+      containers:
+      - name: sntp
+        image: docker.io/library/debian:bookworm
+        command:
+          - bash
+          - -xec
+          - |
+            # modify NTPSERVERS if you want to change it to a different region
+            NTPSERVERS="0.asia.pool.ntp.org 1.asia.pool.ntp.org 2.asia.pool.ntp.org 3.asia.pool.ntp.org"
+            apt-get update && apt-get install -y sntp
+            while [ 1 ]
+            do
+              sntp $NTPSERVERS
+              sleep 30
+            done
