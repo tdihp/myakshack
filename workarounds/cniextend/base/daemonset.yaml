@@ -1,0 +1,66 @@
+apiVersion: apps/v1
+kind: DaemonSet
+metadata:
+  name: cniextend-ds
+spec:
+  template:
+    spec:
+      affinity:
+        nodeAffinity:
+          requiredDuringSchedulingIgnoredDuringExecution:
+            nodeSelectorTerms:
+            - matchExpressions:
+              - key: kubernetes.io/os
+                operator: In
+                values:
+                - linux
+      hostNetwork: true
+      priorityClassName: system-node-critical
+      tolerations:
+      - operator: Exists
+        effect: NoSchedule
+      containers:
+      - name: install-cniextend
+        image: docker.io/library/alpine:3
+        envFrom:
+        - configMapRef:
+            name: cniextend-conf
+        volumeMounts:
+        - name: cni-plugin
+          mountPath: /opt/cni/bin
+        - name: cni
+          mountPath: /etc/cni/net.d
+        - name: run
+          mountPath: /var/run
+        command:
+          - sh
+          - -xec
+          - |
+            $(CNIEXTEND_SH_DEPENDENCY)
+            cd /etc/cni/net.d
+            while [ 1 ]
+            do
+              TGT=`ls -1 *.conflist | grep -Fxv "$CNIEXTEND_CONFLIST_FILENAME" | head -n 1`
+              <"$TGT" jq --argjson plugins "$CNIEXTEND_PLUGINS" '.plugins += $plugins' >"${CNIEXTEND_CONFLIST_FILENAME}.new"
+              newhash=`md5sum "${CNIEXTEND_CONFLIST_FILENAME}.new" | cut -f 1 -d " "`
+              if [ -f "${CNIEXTEND_CONFLIST_FILENAME}" ]; then
+                oldhash=`md5sum "$CNIEXTEND_CONFLIST_FILENAME" | cut -f 1 -d " "`
+                if [ "$oldhash" != "$newhash" ]; then
+                  mv "${CNIEXTEND_CONFLIST_FILENAME}.new" "$CNIEXTEND_CONFLIST_FILENAME"
+                fi
+              else
+                mv "${CNIEXTEND_CONFLIST_FILENAME}.new" "$CNIEXTEND_CONFLIST_FILENAME"
+              fi
+              touch "/var/run/cniextend-enabled-$CNICONFIG_VERSION"
+              sleep 60
+            done
+      volumes:
+      - name: cni-plugin
+        hostPath:
+          path: /opt/cni/bin
+      - name: cni
+        hostPath:
+          path: /etc/cni/net.d
+      - name: run
+        hostPath:
+          path: /var/run

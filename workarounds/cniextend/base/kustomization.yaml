@@ -1,0 +1,23 @@
+resources:
+- daemonset.yaml
+images:
+- name: alpine
+  newName: docker.io/library/alpine
+  newTag: "3"
+commonLabels:
+  tier: node
+  app: cniextend
+namespace:
+  kube-system
+configMapGenerator:
+- name: cniextend-conf
+  literals:
+  - CNIEXTEND_SH_DEPENDENCY=apk add jq
+  - CNIEXTEND_CONFLIST_FILENAME=00-cniextend.conflist
+  # This marks a file /var/run/cniextend-enabled-$CNICONFIG_VERSION
+  # to guarantee the node has the version installed.
+  # User should bump this every time plugins changed.
+  - CNICONFIG_VERSION=0
+  # A json list of plugins that you'd append to the conflist
+  - |
+    CNIEXTEND_PLUGINS=[]

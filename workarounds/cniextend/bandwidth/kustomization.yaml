@@ -1,0 +1,15 @@
+resources:
+- ../base
+configMapGenerator:
+- name: cniextend-conf
+  behavior: merge
+  literals:
+  - |
+    CNIEXTEND_PLUGINS=[{
+      "name": "slowdown",
+      "type": "bandwidth",
+      "ingressRate": 123,
+      "ingressBurst": 456,
+      "egressRate": 123,
+      "egressBurst": 456
+    }]
