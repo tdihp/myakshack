@@ -1,0 +1,39 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: downread
+  labels:
+    app: downread
+spec:
+  replicas: 3
+  selector:
+    matchLabels:
+      app: downread
+  template:
+    metadata:
+      labels:
+        app: downread
+    spec:
+      containers:
+      - name: luajit
+        image: registry.k8s.io/ingress-nginx/controller:v1.11.3
+        command:
+        - sh
+        - -c
+        - | 
+          yes | xargs -I{} find /sys/fs/cgroup -type f | xargs -I{} -P100 time luajit -e '
+            local nf = assert(io.open("/dev/null", "w"))
+            for i=1,100000 do
+              local f = io.open("{}")
+              if f
+              then nf:write(f:read("a"))
+              else os.exit()
+            end
+          end'
+        resources:
+          requests:
+            memory: "512Mi"
+            cpu: "100m"
+          limits:
+            memory: "512Mi"
+            cpu: "100m"

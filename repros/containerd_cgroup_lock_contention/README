@@ -1,0 +1,11 @@
+reproduction of cgroup lock contention
+
+This folder attempts to replicate https://access.redhat.com/solutions/7015126
+with minimum computing resource.
+
+Instructions:
+1. Create a cluster with 1 node with Linux 5.15
+2. kubectl apply -f downread.yaml
+3. kubectl apply -f downwrite.yaml
+4. access node, observe `ps -aux | grep ' D '` now should show long list of
+   processes trying to access cgroup
