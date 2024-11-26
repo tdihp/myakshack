@@ -5,7 +5,7 @@ metadata:
   labels:
     app: downread
 spec:
-  replicas: 3
+  replicas: 6
   selector:
     matchLabels:
       app: downread
@@ -21,7 +21,7 @@ spec:
         - sh
         - -c
         - | 
-          yes | xargs -I{} find /sys/fs/cgroup -type f | xargs -I{} -P100 time luajit -e '
+          yes | xargs -I{} find /sys/fs/cgroup -type f | xargs -I{} -P10 time luajit -e '
             local nf = assert(io.open("/dev/null", "w"))
             for i=1,100000 do
               local f = io.open("{}")
@@ -32,8 +32,11 @@ spec:
           end'
         resources:
           requests:
-            memory: "512Mi"
-            cpu: "100m"
+            memory: "50Mi"
+            cpu: "10m"
           limits:
-            memory: "512Mi"
-            cpu: "100m"
+            memory: "50Mi"
+            cpu: "10m"
+          # limits:
+          #   memory: "512Mi"
+          #   cpu: "100m"
