@@ -1,0 +1,137 @@
+apiVersion: apps/v1
+kind: StatefulSet
+metadata:
+  name: zfsserver
+spec:
+  selector:
+    matchLabels:
+      app: zfsserver # has to match .spec.template.metadata.labels
+  serviceName: "zfsserver"
+  replicas: 1
+  minReadySeconds: 10 # by default is 0
+  template:
+    metadata:
+      labels:
+        app: zfsserver # has to match .spec.selector.matchLabels
+    spec:
+      nodeSelector:
+        kubernetes.azure.com/os-sku: Ubuntu
+        kubernetes.io/os: linux
+      terminationGracePeriodSeconds: 10
+      containers:
+      # https://github.com/kubernetes-csi/csi-driver-nfs/blob/master/deploy/example/nfs-provisioner/nfs-server.yaml
+      - name: nfsserver
+        # image: itsthenetwork/nfs-server-alpine:latest
+        image: alpine
+        env:
+        - name: SHARED_DIRECTORY
+          value: "/mnt"
+        command:
+        - sh
+        - -xc
+        - |
+          apk add nfs-utils
+          cat -<<EOF >/etc/exports
+          /mnt *(rw,crossmnt,fsid=0,sync,no_subtree_check,no_auth_nlm,insecure,no_root_squash)
+          EOF
+          /sbin/rpcbind -w
+          /sbin/rpcinfo
+          /usr/sbin/rpc.nfsd --debug 8 --no-udp -N3
+          /usr/sbin/exportfs -av
+          /usr/sbin/rpc.mountd --debug all --no-udp -N3 -F
+        securityContext:
+          privileged: true
+        ports:
+        - name: tcp-2049
+          containerPort: 2049
+          protocol: TCP
+        - name: udp-111
+          containerPort: 111
+          protocol: UDP
+        volumeMounts:
+        - name: mnt
+          mountPath: /mnt
+          mountPropagation: HostToContainer
+      - name: zfsutils
+        image: ubuntu:22.04
+        env:
+        - name: POD_UID
+          valueFrom:
+            fieldRef:
+              fieldPath: metadata.uid
+        - name: POD_NAMESPACE
+          valueFrom:
+            fieldRef:
+              fieldPath: metadata.namespace
+        - name: POD_NAME
+          valueFrom:
+            fieldRef:
+              fieldPath: metadata.name
+        - name: ZPOOLNAME
+          value: $(POD_NAMESPACE)--$(POD_NAME)
+        - name: ZFSDATASET
+          value: mydataset
+        command:
+          - bash
+          - -xc
+          - |
+            apt-get update && apt-get install -y jq
+            # chroot /host /sbin/modprobe zfs
+            chroot /host apt-get update
+            chroot /host apt-get install -y zfsutils-linux
+            # running zfs commands in container seem not working well.
+            # we run them in the node using chroot instead.
+            # note that we need to convert
+            # all devices/paths to node equivalent. 
+            ZFSDEV=`lsblk -Jd /zfsdev | jq -r .blockdevices[0].name`
+            # use function instead of alias since we are non-interactive
+            # alias zpool="chroot /host zpool"
+            # alias zfs="chroot /host zfs"
+            zpool() { chroot /host zpool "$@"; }
+            zfs() { chroot /host zfs "$@"; }
+            teardown() {
+              # umount /mnt/pool
+              # unclear why we need to run this multiple times, but this seem
+              # to be necessary
+              zfs unmount "$ZPOOLNAME"
+              zfs unmount "$ZPOOLNAME"
+              zfs unmount "$ZPOOLNAME"
+              zpool export "$ZPOOLNAME"
+            } >/dev/termination-log 2>&1
+            # we force create a zpool here, in real app need to try import
+            zpool create -f "$ZPOOLNAME" "$ZFSDEV"
+            # just to make sure the zpool is mounted, since I'm restarting the pod
+            zfs mount "$ZPOOLNAME"
+            trap teardown EXIT
+            # create a dataset
+            zfs create "$ZPOOLNAME/$ZFSDATASET"
+            zfs mount "$ZPOOLNAME/$ZFSDATASET"
+            mkdir /mnt/pool
+            mount --bind "/host/$ZPOOLNAME" /mnt/pool
+            # touch a file in it
+            touch "/mnt/pool/$ZFSDATASET/mydata"
+            sleep infinity &
+            wait
+        securityContext:
+          privileged: true
+        volumeDevices:
+        - name: zfsdev
+          devicePath: /zfsdev
+        volumeMounts:
+        - name: host
+          mountPath: /host
+          mountPropagation: Bidirectional
+        - name: mnt
+          mountPath: /mnt
+          mountPropagation: Bidirectional
+      volumes:
+      - name: zfsdev
+        persistentVolumeClaim:
+          claimName: zfsdev
+      - name: mnt
+        emptyDir:
+          medium: Memory
+          sizeLimit: 10Mi
+      - name: host  # used for chroot
+        hostPath:
+          path: /

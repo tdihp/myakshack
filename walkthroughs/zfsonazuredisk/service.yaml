@@ -1,0 +1,18 @@
+# https://github.com/kubernetes-csi/csi-driver-nfs/blob/master/deploy/example/nfs-provisioner/nfs-server.yaml
+kind: Service
+apiVersion: v1
+metadata:
+  name: nfs-server
+spec:
+  type: ClusterIP  # use "LoadBalancer" to get a public ip
+  selector:
+    app: zfsserver
+  ports:
+    - name: tcp-2049
+      port: 2049
+      protocol: TCP
+    - name: udp-111
+      port: 111
+      protocol: UDP
+  # hard code this is necessary as mounting nfs will not go through coredns
+  clusterIP: 10.0.100.100
