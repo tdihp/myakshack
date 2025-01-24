@@ -1,0 +1,14 @@
+resources:
+- statefulset-qemu.yaml
+# - statefulset-container.yaml
+- service.yaml
+- pvc.yaml
+- sc.yaml
+configMapGenerator:
+- name: mnt
+  files:
+  - mnt/install.sh
+  - mnt/setup-alpine.ans
+  - mnt/02-initzfs.start
+  # this doesn't need to be in qemu, but we need this outside
+  - mnt/provision.exp

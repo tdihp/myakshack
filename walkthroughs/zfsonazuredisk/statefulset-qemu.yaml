@@ -1,0 +1,68 @@
+apiVersion: apps/v1
+kind: StatefulSet
+metadata:
+  name: zfsserver
+spec:
+  selector:
+    matchLabels:
+      app: zfsserver # has to match .spec.template.metadata.labels
+  serviceName: "zfsserver"
+  replicas: 1
+  minReadySeconds: 60 # by default is 0
+  template:
+    metadata:
+      labels:
+        app: zfsserver # has to match .spec.selector.matchLabels
+    spec:
+      nodeSelector:
+        kubernetes.azure.com/os-sku: Ubuntu
+        kubernetes.io/os: linux
+      terminationGracePeriodSeconds: 20
+      containers:
+      # https://github.com/kubernetes-csi/csi-driver-nfs/blob/master/deploy/example/nfs-provisioner/nfs-server.yaml
+      - name: qemu
+        # image: itsthenetwork/nfs-server-alpine:latest
+        image: alpine
+        securityContext:
+          privileged: true
+        volumeDevices:
+        - name: zfsdev
+          devicePath: /zfsdev
+        volumeMounts:
+        - name: mnt
+          mountPath: /root/mnt
+        command:
+        - sh
+        - -c
+        - |
+          cd /root
+          apk add qemu qemu-img qemu-system-x86_64 expect socat picocom
+          qemu-img create -f qcow2 alpine.qcow2 1G
+          wget https://dl-cdn.alpinelinux.org/alpine/v3.21/releases/x86_64/alpine-virt-3.21.2-x86_64.iso
+          qemu-system-x86_64 \
+            -m 512 \
+            -nographic \
+            -enable-kvm \
+            -boot once=d \
+            -cdrom alpine-virt-3.21.2-x86_64.iso \
+            -hda alpine.qcow2 \
+            -drive file=/zfsdev,format=raw,if=virtio,index=1,media=disk \
+            -nic user,hostfwd=tcp:0.0.0.0:2049-:2049,hostfwd=udp:0.0.0.0:111-:111 \
+            -virtfs local,path=mnt,mount_tag=install,security_model=none,readonly=on \
+            -serial file:/dev/stdout \
+            -serial pty \
+            -serial unix:alpineserial.sock,server=on,wait=off \
+            -pidfile qemu.pid &
+          while [ ! -e alpineserial.sock ]; do sleep 1; done
+          expect mnt/provision.exp
+          wait
+      volumes:
+      - name: zfsdev
+        persistentVolumeClaim:
+          claimName: zfsdev
+      - name: mnt
+        configMap:
+          name: mnt
+      # - name: host  # used for chroot
+      #   hostPath:
+      #     path: /

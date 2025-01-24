@@ -1,0 +1,21 @@
+#!/bin/sh
+set -xe
+POOLDEV=/dev/vda
+POOLNAME=mypool
+
+[ ! -e "$POOLDEV" ] && {
+    echo "$POOLDEV not found"
+    exit 1
+}
+
+command -v zpool || { echo "zpool not found"; exit 1; } 
+
+# interestingly, zpool create always creates partition 1 and 9, and we have to
+# use partition 1
+zpool import -d "${POOLDEV}1" "$POOLNAME"
+# in case the node doesn't have any zpool, initialize POOLDEV
+zpool status "$POOLNAME" || {
+    echo "formatting $POOLDEV"
+    zpool create "$POOLNAME" "$POOLDEV"
+    zfs set sharenfs=on "$POOLNAME"
+}

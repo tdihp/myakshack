@@ -1,0 +1,39 @@
+
+set prompt "(?n)^(localhost|alpine)(:.*)# "
+set login "login: "
+set stty_init "raw"
+# set fd [open "/dev/pts/9" w+]
+# spawn -open $fd
+spawn socat - UNIX-CONNECT:alpineserial.sock
+
+set timeout 60
+# we need very small lines
+match_max 64
+send "\r"
+
+expect_before {
+    timeout {
+        send_user "timeout happened, exiting"
+        exit 1
+    } $login {
+        send "root\r"
+        exp_continue
+    }
+}
+
+expect {
+    -re $prompt {
+        send "
+        mount -t9p install /mnt\r
+        sh /mnt/install.sh 2>&1 | logger -s\r
+        "
+    }
+}
+
+expect -re $prompt {
+    send "reboot\r"
+}
+expect "Welcome to Alpine Linux"
+expect -re $prompt {
+    send_user "now everything done、\r\n"
+}
