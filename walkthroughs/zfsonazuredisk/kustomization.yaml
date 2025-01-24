@@ -6,6 +6,7 @@ resources:
 - sc.yaml
 configMapGenerator:
 - name: mnt
+  # only needed for qemu
   files:
   - mnt/install.sh
   - mnt/setup-alpine.ans
