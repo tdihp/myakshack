@@ -1,0 +1,69 @@
+apiVersion: apps/v1
+kind: DaemonSet
+metadata:
+  name: seccompconfig
+  labels:
+    app: seccompconfig
+spec:
+  selector:
+    matchLabels:
+      app: seccompconfig
+  template:
+    metadata:
+      labels:
+        app: seccompconfig
+    spec:
+      hostNetwork: true
+      hostPID: true
+      enableServiceLinks: false
+      dnsPolicy: Default
+      automountServiceAccountToken: false
+      nodeSelector:
+        kubernetes.io/os: linux
+      terminationGracePeriodSeconds: 1
+      containers:
+      - name: seccompconfig
+        image: library/alpine
+        command:
+        - sh
+        - -c
+        - |
+          # refer to https://github.com/opencontainers/runtime-spec/blob/v1.2.0/specs-go/config.go#L699-L800
+          # for the complete "profile" specification
+          # this profile raises audit whenever a AF_INET(2), TCP socket,
+          # i.e., SOCK_STREAM(1) is created
+          cat - >/var/lib/kubelet/seccomp/profiles/ipv4tcpaudit.json <<EOF
+          {
+            "defaultAction": "SCMP_ACT_ALLOW",
+            "syscalls": [
+              {
+                "names": ["socket"],
+                "args": [
+                  {
+                    "index": 0,
+                    "op": "SCMP_CMP_EQ",
+                    "value": 2
+                  },
+                  {
+                    "index": 1,
+                    "op": "SCMP_CMP_MASKED_EQ",
+                    "value": 15,
+                    "ValueTwo": 1
+                  }
+                ],
+                "action": "SCMP_ACT_LOG"
+              }
+            ]
+          }
+          EOF
+          echo "profiles synced"
+          sleep inf &
+          wait
+        volumeMounts:
+        - name: profiles
+          mountPath: /var/lib/kubelet/seccomp/profiles
+      volumes:
+        - name: profiles
+          hostPath:
+            path: /var/lib/kubelet/seccomp/profiles
+            type: DirectoryOrCreate
