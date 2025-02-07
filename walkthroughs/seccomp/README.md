@@ -1,4 +1,6 @@
-# Filtering syscall args
+# SECCOMP scenarios
+
+## Filtering syscall args
 
 Seccomp "profile" json that filters syscall args.
 
