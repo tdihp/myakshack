@@ -28,6 +28,39 @@ kubectl run -n $K8S_NS -it --rm --restart=Never \
     '
 ```
 
+## Workload Identity with curl
+
+For users who don't want to use SDK for authentication, Getting token with curl
+(or a web client) is, with boilerplates but possible in one go following
+https://learn.microsoft.com/en-us/entra/identity-platform/v2-oauth2-client-creds-grant-flow#third-case-access-token-request-with-a-federated-credential:
+
+```shell
+source env.sh
+OVERRIDES=$(cat <<EOF
+    {
+        "metadata": {"labels":{"azure.workload.identity/use": "true"}},
+        "spec": {"serviceAccountName": "$SA_NAME"}
+    }
+EOF
+)
+kubectl run -n $K8S_NS -it --rm --restart=Never \
+    --image=mcr.microsoft.com/azure-cli azure-cli \
+    --overrides "$OVERRIDES" \
+    -- bash -c \
+    '
+    SCOPE=https://graph.microsoft.com/.default
+    curl \
+      "https://login.microsoftonline.com/$AZURE_TENANT_ID/oauth2/v2.0/token" \
+      --data-urlencode scope="$SCOPE" \
+      --data-urlencode client_id="$AZURE_CLIENT_ID" \
+      --data-urlencode client_assertion_type="urn:ietf:params:oauth:client-assertion-type:jwt-bearer" \
+      --data-urlencode client_assertion@"$AZURE_FEDERATED_TOKEN_FILE" \
+      --data-urlencode grant_type=client_credentials | jq
+    '
+```
+
+We should see "access_token" and its content in the json output of this command.
+
 ## Workload Identity with Terraform+azurerm
 
 ```shell
