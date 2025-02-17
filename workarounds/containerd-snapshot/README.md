@@ -4,6 +4,8 @@ This effort locates overlay snapshot path to images. This should help if some
 security scanner located suspectable binary in snapshot paths, without knowing
 which image it belongs to.
 
+Tested on Containerd 1.7.25
+
 ## Install bbolt
 
 Containerd uses [bbolt](https://github.com/etcd-io/bbolt/tree/main) for storing
