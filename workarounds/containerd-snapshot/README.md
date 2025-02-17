@@ -12,12 +12,10 @@ snapshot status. bbolt database will be extracted to get a layer to id mapping.
 See https://github.com/containerd/containerd/blob/e82d201b3ffb87c15d2b7be2eb2e0c7bfa99d114/snapshots/storage/bolt.go.
 
 ``` shell
-# download golang to /usr/local
+# download golang to /usr/local, assuming a fresh installation
+export PATH=$PATH:/usr/local/go/bin:~/go/bin
 curl -Ls https://go.dev/dl/go1.24.0.linux-amd64.tar.gz | tar zx -C /usr/local 
-export PATH=$PATH:/usr/local/go/bin
 go install go.etcd.io/bbolt/cmd/bbolt@v1.4.0
-# we use the default GOROOT at home
-export PATH=$PATH:~/go/bin
 ```
 
 ## Extract snapshot sha to ID mapping
@@ -57,8 +55,8 @@ layer2id | sort -t " " -k 1 >layer2id.txt
 
 ``` shell
 image2layers() {
-  for image in $(crictl images -o json | jq -r '.images[] | .id'); do
-    for layer in $(crictl inspecti -o json $image | jq -r '.info.imageSpec.rootfs.diff_ids[]'); do
+  for image in $(ctr -n k8s.io i ls | cut -d" " -f1 | tail -n+2); do
+    for layer in $(ctr -n k8s.io i usage $image | cut -d" " -f1 | tail -n+2); do
       echo "$image $layer"
     done
   done
