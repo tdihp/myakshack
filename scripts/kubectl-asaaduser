@@ -1,0 +1,299 @@
+#!/bin/sh
+set -e
+# Copyright (c) 2023, Ping He.
+#
+# License: MIT
+# 2025-02-20    Ping He created this
+
+USAGE='
+Usage:
+  kubectl-asaaduser [options] [--] <kubectl command>
+
+Run a kubectl command, impersonating a Azure Entra ID / AAD user.
+This script expects coreutils, util-linux, azure-cli, kubectl and jq installed,
+and assumes you have the azure-cli in the right tenant, and have the permission
+to query user detail of the user to impersonate.
+
+See https://github.com/Azure/AKS/issues/4743 for the typical use case.
+
+Options:
+ --id                            : locate user info with az ad user show --id
+ --display-name, --filter, --upn : locate user info with az ad user list
+ -h, --help                      : display this help
+
+In addition to the mentioned options, most of kubectl options are supported,
+with a few exceptions:
+ --as, --as-group, --as-uid are forbidden;
+ Boolean options, such as --insecure-skip-tls-verify and --warnings-as-errors
+ will not take optional argument. For example, --insecure-skip-tls-verify=true
+ is not valid, while --insecure-skip-tls-verify along is valid.
+ Other options, such as --context, --cluster, --kubeconfig are all supported.
+
+Environment Variables
+ ASAADUSER_LOGSEV     : lowest severity, default to "I", among "IWEF"
+ ASAADUSER_LOGLEVEL   : log verbosity, default to 2, 6 being most verbose
+ ASAADUSER_KUBECONFIG : temporary kubeconfig that has the impersonated
+                        configuration, default to ~/.asaaduser.kubeconfig
+
+Examples:
+    Run "kubectl can-i get pod" with jane@contoso.com.
+        kubectl asaaduser --id jane@contoso.com can-i get pod
+
+    Alternatively, search for user Jane Doe, then run "kubectl get node".
+        kubectl asaaduser --display-name "Jane Doe" get node
+'
+
+# This application assumes kubectl, coreutils and azure-cli are installed
+# minimal code that mimics klog format
+: ${ASAADUSER_LOGSEV:='I'}
+: ${ASAADUSER_LOGLEVEL:='2'}
+LOGSEVS=$(echo -n "IWEF" | grep -Eoe "$ASAADUSER_LOGSEV.*")
+log() {
+    local sev="$1"
+    local lvl="$2"
+    shift 2
+    case "$LOGSEVS" in
+        *"$sev"*)
+            if [ $lvl -le $ASAADUSER_LOGLEVEL ]; then
+                echo "${sev}`date -u '+%m%d %H:%M:%S.%6N'`" "$@" >&2
+            fi
+        ;;
+    esac
+}
+fatal() {
+    log F 1 "$@"
+    exit 2
+}
+
+# utility to reliably quote our args across shells
+# considering https://unix.stackexchange.com/a/600214/312809, we only need this
+# to work across the same shell, using the alias trick.
+# Not using ${v%q} because plan to support ash/dash
+shquote() {
+    alias __shquote="$1"
+    local t=$(alias __shquote)
+    echo -n "${t#*__shquote=}"
+    unalias __shquote
+}
+
+# read all kubectl options dynamically for getopt usage
+get_kubectl_options() {
+    KUBECTL_OPTS=""
+    KUBECTL_LONGOPTS=""
+    for opt in $(kubectl options | grep -oEe ' -([a-z]|-[-a-z]+)(=(true|false))?'); do
+        log I 6 "inspecting option $opt"
+        case "$opt" in
+            -[a-z])
+                KUBECTL_OPTS="$KUBECTL_OPTS${opt##-}:"
+            ;;
+            --*=*)
+                opt="${opt%%=*}"
+                KUBECTL_LONGOPTS="$KUBECTL_LONGOPTS,${opt##--}"
+            ;;
+            --*)
+                KUBECTL_LONGOPTS="$KUBECTL_LONGOPTS,${opt##--}:"
+            ;;
+            *)
+                log W 1 "unrecognized kubectl option $opt"
+            ;;
+        esac
+    done
+    KUBECTL_LONGOPTS="${KUBECTL_LONGOPTS#,}"
+    log I 6 "got KUBECTL_OPTS=$KUBECTL_OPTS KUBECTL_LONGOPTS=$KUBECTL_LONGOPTS"
+}
+
+get_kubectl_options
+
+TEMP=$(POSIXLY_CORRECT=1 getopt \
+    -n "asaaduser" \
+    -o "h""$KUBECTL_OPTS" \
+    -l "help,id:,display-name:,filter:,upn:,""$KUBECTL_LONGOPTS" \
+    -- "$@")
+
+log I 6 "TEMP: $TEMP"
+
+if [ $? -ne 0 ]; then
+        echo "$USAGE" >&2
+        exit 1
+fi
+
+eval set -- "$TEMP"
+unset TEMP
+
+while true; do
+    case "$1" in
+        '--')
+            # the rest should all be kubectl command
+            shift
+            break
+        ;;
+        '-h'|'--help')
+            echo "$USAGE"
+            exit
+        ;;
+        '--id')
+            AZADUSERSHOW_ARGS="$AZADUSERSHOW_ARGS $1 $(shquote "$2")"
+            shift 2
+        ;;
+        '--display-name'|'--filter'|'--upn')
+            AZADUSERLIST_ARGS="$AZADUSERLIST_ARGS $1 $(shquote "$2")"
+            shift 2
+        ;;
+        --as*)
+            fatal "Unsupported kubectl flag $1">&2
+        ;;
+        '--context')
+            CONTEXTNAME="$2"
+            shift 2
+        ;;
+        '--cluster')
+            CLUSTERNAME="$2"
+            shift 2
+        ;;
+        '--user')
+            USERNAME="$2"
+            shift 2
+        ;;
+        '--kubeconfig')
+            # just overwrites KUBECONFIG
+            KUBECONFIG="$2"
+            shift 2
+        ;;
+        *)
+            # unknown args are passed to kubectl as-is prior to kubectl command
+            KUBECTL_ARGS="$KUBECTL_ARGS $(shquote $1)"
+            shift
+        ;;
+    esac
+done
+
+log I 6 "AZADUSERLIST_ARGS: $AZADUSERLIST_ARGS"
+log I 6 "AZADUSERSHOW_ARGS: $AZADUSERSHOW_ARGS"
+log I 6 "KUBECTL_ARGS: $KUBECTL_ARGS"
+
+# we can't have both list/show args configured
+if [ ! -z "$AZADUSERLIST_ARGS" ] && [ ! -z "$AZADUSERSHOW_ARGS" ]; then
+    fatal "($AZADUSERLIST_ARGS) and ($AZADUSERSHOW_ARGS) are mutually exclusive"
+fi
+
+if [ -z "$AZADUSERLIST_ARGS" ] && [ -z "$AZADUSERSHOW_ARGS" ]; then
+    fatal "aad user not specified"
+fi
+
+if [ ! -z "$AZADUSERLIST_ARGS" ]; then
+    AADUSERS=$(eval az ad user list $AZADUSERLIST_ARGS)
+    log I 4 "$AADUSERS"
+    case $(jq -n "$AADUSERS | length") in
+        "0")
+            fatal "no results found in az ad user list $AZADUSERLIST_ARGS"
+        ;;
+        "1")
+            AADUSER=$(jq -n "$AADUSERS | .[0]")
+        ;;
+        *)
+            fatal "multiple results found in az ad user list $AZADUSERLIST_ARGS"
+        ;;
+    esac
+fi
+
+if [ ! -z "$AZADUSERSHOW_ARGS" ]; then
+    AADUSER=$(eval az ad user show $AZADUSERSHOW_ARGS)
+fi
+
+log I 4 "AADUSER: $AADUSER"
+AAD_UPN=$(jq -nr "$AADUSER.userPrincipalName")
+AAD_OID=$(jq -nr "$AADUSER.id")
+log I 2 "AAD_UPN: $AAD_UPN"
+log I 2 "AAD_OID: $AAD_OID"
+case "$AAD_UPN" in
+    # if UPN has #EXT#, we use OID instead
+    *#EXT#*)
+        # we follow guard's logic, i.e., if token has upn, we use upn, otherwise
+        # we use oid.
+        TOKENUSER="$AAD_OID"
+    ;;
+    *)
+        TOKENUSER="$AAD_UPN"
+    ;;
+esac
+log I 2 "TOKENUSER: $TOKENUSER"
+AAD_GROUPS=$(az ad user get-member-groups --id "$AAD_OID" --security-enabled-only --query "[].id")
+log I 2 "AAD_GROUPS: $AAD_GROUPS"
+
+# TODO: validate tenant ID if user hints a tenant
+TENANT_ID=$(az account show --query 'tenantId' -otsv)
+
+CONFIGJSON=$(KUBECONFIG="$KUBECONFIG" kubectl config view -ojson --raw)
+log I 6 "CONFIGJSON: $CONFIGJSON"
+: ${CONTEXTNAME:=$(jq -nr "$CONFIGJSON | .[\"current-context\"]")}
+log I 3 "CONTEXTNAME: $CONTEXTNAME"
+
+# reading context
+CONTEXTJSON=$(jq -n "$CONFIGJSON | .contexts[]? | select(.name==\"$CONTEXTNAME\").context")
+log I 6 "CONTEXTJSON: $CONTEXTJSON"
+if [ ! -z "$CONTEXTJSON" ]; then
+    : ${CLUSTERNAME:=$(jq -nr "$CONTEXTJSON | .cluster")}
+    : ${USERNAME:=$(jq -nr "$CONTEXTJSON | .user")}
+else
+    log W 2 "unable to find context, proceeding using a blank config"
+fi
+log I 3 "CLUSTERNAME: $CLUSTERNAME"
+log I 3 "USERNAME: $USERNAME"
+
+# reading cluster
+CLUSTERJSON=$(jq -n "$CONFIGJSON.clusters[]? | select(.name==\"$CLUSTERNAME\").cluster")
+: ${CLUSTERJSON:='{}'}
+log I 4 "CLUSTERJSON: $CLUSTERJSON"
+
+
+# reading user
+USERJSON=$(jq -n "$CONFIGJSON.users[]? | select(.name==\"$USERNAME\").user")
+: ${USERJSON:='{}'}
+log I 4 "USERJSON: $USERJSON"
+# TODO: validate the user doesn't already impersonate
+
+# update the impersonation details to user
+USERJSON=$(jq "$USERJSON * ." <<EOF
+{
+    "as": "$TOKENUSER",
+    "as-groups": $AAD_GROUPS,
+    "as-user-extra": {
+        "oid": ["$AAD_OID"]
+    }
+}
+EOF
+)
+log I 6 "result USERJSON: $USERJSON"
+: ${ASAADUSER_KUBECONFIG:="$HOME/.asaaduser.kubeconfig"}
+log I 2 "writing kubeconfig to $ASAADUSER_KUBECONFIG"
+cat >"$ASAADUSER_KUBECONFIG" <<EOF
+{
+    "kind": "Config",
+    "apiVersion": "v1",
+    "clusters": [
+        {
+            "name": "asaaduser",
+            "cluster": $CLUSTERJSON
+        }
+    ],
+    "users": [
+        {
+            "name": "asaaduser",
+            "user": $USERJSON
+        }
+    ],
+    "contexts": [
+        {
+            "name": "asaaduser",
+            "context": {
+                "user": "asaaduser",
+                "cluster": "asaaduser"
+            }
+        }
+    ],
+    "current-context": "asaaduser"
+}
+EOF
+
+log I 6 "executing kubectl $KUBECTL_ARGS $@"
+eval KUBECONFIG="$ASAADUSER_KUBECONFIG" kubectl $KUBECTL_ARGS "$@"
