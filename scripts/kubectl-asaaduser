@@ -4,6 +4,7 @@ set -e
 #
 # License: MIT
 # 2025-02-20    Ping He created this
+# 2025-02-21    Ping He validate azure-cli's tenant id is same as kubelogin
 
 USAGE='
 Usage:
@@ -43,8 +44,8 @@ Examples:
         kubectl asaaduser --display-name "Jane Doe" get node
 '
 
-# This application assumes kubectl, coreutils and azure-cli are installed
 # minimal code that mimics klog format
+# limitation: busybox date might not support nanoseconds (%N)
 : ${ASAADUSER_LOGSEV:='I'}
 : ${ASAADUSER_LOGLEVEL:='2'}
 LOGSEVS=$(echo -n "IWEF" | grep -Eoe "$ASAADUSER_LOGSEV.*")
@@ -220,9 +221,6 @@ log I 2 "TOKENUSER: $TOKENUSER"
 AAD_GROUPS=$(az ad user get-member-groups --id "$AAD_OID" --security-enabled-only --query "[].id")
 log I 2 "AAD_GROUPS: $AAD_GROUPS"
 
-# TODO: validate tenant ID if user hints a tenant
-TENANT_ID=$(az account show --query 'tenantId' -otsv)
-
 CONFIGJSON=$(KUBECONFIG="$KUBECONFIG" kubectl config view -ojson --raw)
 log I 6 "CONFIGJSON: $CONFIGJSON"
 : ${CONTEXTNAME:=$(jq -nr "$CONFIGJSON | .[\"current-context\"]")}
@@ -251,6 +249,15 @@ USERJSON=$(jq -n "$CONFIGJSON.users[]? | select(.name==\"$USERNAME\").user")
 : ${USERJSON:='{}'}
 log I 4 "USERJSON: $USERJSON"
 # TODO: validate the user doesn't already impersonate
+TENANT_ID=$(az account show --query 'tenantId' -otsv)
+log I 4 "TENANT_ID: $TENANT_ID"
+KUBELOGIN_TENANTID=$(jq -rn "$USERJSON.exec.args | .[index(\"--tenant-id\") + 1] // empty")
+log I 4 "KUBELOGIN_TENANTID: $KUBELOGIN_TENANTID"
+if [ -z "$KUBELOGIN_TENANTID" ]; then
+    log W 2 "not able to determine cluster's tenant ID"
+elif [ "$KUBELOGIN_TENANTID" != "$TENANT_ID" ]; then
+    log W 1 "KUBELOGIN_TENANTID $KUBELOGIN_TENANTID is different from azure-cli tenant $TENANT_ID"
+fi
 
 # update the impersonation details to user
 USERJSON=$(jq "$USERJSON * ." <<EOF
@@ -266,7 +273,7 @@ EOF
 log I 6 "result USERJSON: $USERJSON"
 : ${ASAADUSER_KUBECONFIG:="$HOME/.asaaduser.kubeconfig"}
 log I 2 "writing kubeconfig to $ASAADUSER_KUBECONFIG"
-cat >"$ASAADUSER_KUBECONFIG" <<EOF
+jq >"$ASAADUSER_KUBECONFIG" <<EOF
 {
     "kind": "Config",
     "apiVersion": "v1",
