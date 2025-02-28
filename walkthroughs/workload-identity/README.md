@@ -35,7 +35,6 @@ For users who don't want to use SDK for authentication, Getting token with curl
 https://learn.microsoft.com/en-us/entra/identity-platform/v2-oauth2-client-creds-grant-flow#third-case-access-token-request-with-a-federated-credential:
 
 ```shell
-source env.sh
 OVERRIDES=$(cat <<EOF
     {
         "metadata": {"labels":{"azure.workload.identity/use": "true"}},
