@@ -9,12 +9,12 @@ terraform {
 }
 
 provider "azurerm" {
-  subscription_id = "$SUB_ID"
+  subscription_id = "$LAB_SUBSCRIPTION"
   skip_provider_registration = true
   features {}
 }
 
 resource "azurerm_resource_group" "rg" {
-  name     = "$DESTRG"
-  location = "$REGION"
+  name     = "$LAB_DESTRG"
+  location = "$LAB_REGION"
 }

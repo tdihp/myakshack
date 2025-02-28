@@ -1,2 +1,4 @@
 main.tf
+env.sh
+access-instructions.md
 .kubeconfig
