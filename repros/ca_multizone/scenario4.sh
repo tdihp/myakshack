@@ -1,7 +1,7 @@
 . env.sh
-zone=`printf "$LAB_REGION-%s__" {1..3}`
-zone="${zone%__}"
-echo "using zone $zone"
+ZONE=$(printf "$LAB_REGION-%s__" "${LAB_ZONES[@]}")
+ZONE="${ZONE%__}"
+echo "using zone $ZONE"
 
 kubectl apply -f- << EOF
 apiVersion: apps/v1
@@ -21,7 +21,7 @@ spec:
       nodeSelector:
         "kubernetes.io/os": linux
         "lab_ca": "multizone0"
-        "topology.kubernetes.io/zone": "$zone"
+        "topology.kubernetes.io/zone": "$ZONE"
       containers:
       - image: alpine
         name: alpine

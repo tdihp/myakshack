@@ -1,5 +1,5 @@
-zone=`kubectl get node -l "lab_ca=multizone1" -ojson | jq -r '.items[0].metadata.labels["topology.kubernetes.io/zone"]'`
-echo "using existing zone $zone"
+ZONE=$(kubectl --kubeconfig="$LAB_KUBECONFIG" get node -l "lab_ca=multizone1" -ojson | jq -r '.items[0].metadata.labels["topology.kubernetes.io/zone"]')
+echo "using existing zone $ZONE"
 
 kubectl apply -f- << EOF
 apiVersion: apps/v1
@@ -19,7 +19,7 @@ spec:
       nodeSelector:
         "kubernetes.io/os": linux
         "lab_ca": "multizone1"
-        "topology.kubernetes.io/zone": "$zone"
+        "topology.kubernetes.io/zone": "$ZONE"
       containers:
       - image: alpine
         name: alpine

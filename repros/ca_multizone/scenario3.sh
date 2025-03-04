@@ -1,6 +1,6 @@
 . env.sh
-zone="$LAB_REGION-1"
-echo "using zone $zone"
+ZONE="$LAB_REGION-${LAB_ZONES[0]}"
+echo "using zone $ZONE"
 
 kubectl apply -f- << EOF
 apiVersion: apps/v1

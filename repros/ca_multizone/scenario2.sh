@@ -1,9 +1,9 @@
 . env.sh
-zone=$(comm -23 \
-  <(printf "$LAB_REGION-%s\n" {1..3})\
-  <(kubectl get node -l "lab_ca=multizone1" -ojson | jq -r '.items[].metadata.labels["topology.kubernetes.io/zone"]' | sort | uniq)\
+ZONE=$(comm -23 \
+  <(printf "$LAB_REGION-%s\n" "${LAB_ZONES[@]}")\
+  <(kubectl --kubeconfig="$LAB_KUBECONFIG" get node -l "lab_ca=multizone1" -ojson | jq -r '.items[].metadata.labels["topology.kubernetes.io/zone"]' | sort | uniq)\
   | head -n 1)
-echo "using absent zone $zone"
+echo "using absent zone $ZONE"
 
 kubectl apply -f- << EOF
 apiVersion: apps/v1
@@ -23,7 +23,7 @@ spec:
       nodeSelector:
         "kubernetes.io/os": linux
         "lab_ca": "multizone1"
-        "topology.kubernetes.io/zone": "$zone"
+        "topology.kubernetes.io/zone": "$ZONE"
       containers:
       - image: alpine
         name: alpine

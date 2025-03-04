@@ -1,131 +1,73 @@
 #!/bin/bash
+. utils.bash
+
 makeenv () {
     # override LAB_REGION if other region needed
-    : "${LAB_REGION:=southeastasia}"
+    : ${LAB_REGION:=southeastasia}
+    : ${LAB_AKS_VERSION:=$(aksversion "$LAB_REGION")}
     LAB_PURPOSE=caspread
-    NOW="$(date -u +%Y%m%d)"
-    LAB_AKSNAME="lab-${LAB_PURPOSE}-${NOW}-aks"
-    LAB_RG="lab-${LAB_PURPOSE}-${NOW}-rg"
-    LAB_VNET_NAME="lab-${LAB_PURPOSE}-${NOW}-vnet"
+    local NOW="$(date -u +%Y%m%d)"
+    local PREFIX="lab-$LAB_PURPOSE-$NOW"
+    LAB_RG="$PREFIX-rg"
+    LAB_AKS_NAME="$PREFIX-aks"
+    LAB_VNET_NAME="$PREFIX-vnet"
     LAB_VNET_CIDR="10.0.0.0/8"
     LAB_AKS_SUBNET_CIDR="10.1.0.0/16"
     # make sure we use a cheap size that has predictable CPU allocatable
+    # this is not used for the AKS system pool, for that one we use the default
     LAB_NODE_SIZE="Standard_B2s"
-    LAB_AKS_VERSION="1.28"
+    LAB_ZONES=(1 2)  # modify this to be in subscription limit
+    LAB_KUBECONFIG="$SCRIPTDIR/.kubeconfig"
 }
+getenv env.sh
+set -xe -o pipefail
 
-saveenv() {
-    declare -g | grep -e '^LAB_'
-} >env.sh
-
-if [ ! -f env.sh ]; then
-    makeenv
-    saveenv
-else
-    . env.sh
+if [ ${#LAB_ZONES[@]} -lt 2 ]; then
+    echo "need at least 2 availability zones, found ${LAB_ZONES[@]}"
+    exit 1
 fi
-set -x
-az group create -l "$LAB_REGION" -n "$LAB_RG"
+
+az group create -l "$LAB_REGION" -n "$LAB_RG" -onone
 
 az network vnet create -g "$LAB_RG" -n "$LAB_VNET_NAME" \
   --address-prefix "$LAB_VNET_CIDR" \
-  --subnet-name aks --subnet-prefixes "$LAB_AKS_SUBNET_CIDR"
+  --subnet-name aks --subnet-prefixes "$LAB_AKS_SUBNET_CIDR" -onone
 
+# exit
 AKS_SUBNET_ID=$(az network vnet subnet show \
   -g "$LAB_RG" --vnet-name "$LAB_VNET_NAME" -n "aks" \
   --query "id" -otsv)
 
-if az aks show -g "$LAB_RG" -n "$LAB_AKSNAME" --query 'id' -otsv; then
-    echo "AKS cluster already created"
-elif [[ $? == 3 ]]; then
-    set -e
-    az aks create -g "$LAB_RG" -n "$LAB_AKSNAME" \
-        -c 1 -k "$LAB_AKS_VERSION" --enable-managed-identity \
-        --network-plugin azure \
-        --vnet-subnet-id "$AKS_SUBNET_ID" \
-        --zones 1 2 3 \
-        -s "$LAB_NODE_SIZE" \
-        --query 'id' -otsv
-        # --cluster-autoscaler-profile "balance-similar-node-groups=true" \
-    set +e
-else
-    echo 'showing aks cluster failed' && exit 1
-fi
+ensure_aks_cluster -g "$LAB_RG" -n "$LAB_AKS_NAME" -- \
+    -c 2 -k "$LAB_AKS_VERSION" --enable-managed-identity \
+    --network-plugin azure \
+    --vnet-subnet-id "$AKS_SUBNET_ID" \
+    --zones "${LAB_ZONES[@]}"
 
-# we provision a multizone nodepool
-if az aks nodepool show -g "$LAB_RG" --cluster-name "$LAB_AKSNAME" \
-    -n "multizone1" --query 'id' -otsv; then
-    echo "multizone1 nodepool already created"
-elif [[ $? == 3 ]]; then
-    set -e
-    az aks nodepool add -g "$LAB_RG" --cluster-name "$LAB_AKSNAME" \
-        --enable-cluster-autoscaler --zones 1 2 3 \
-        -n "multizone1" -c 1 --min-count 1 --max-count 20 -s "$LAB_NODE_SIZE" \
-        --labels "lab_ca=multizone1" \
-        --query 'id' -otsv
-    set +e
-else
-    echo "failed listing nodepool multizone1" && exit 1
-fi
+# we provision a multizone nodepool with 1 start node
+ensure_aks_nodepool -g "$LAB_RG" --cluster-name "$LAB_AKS_NAME" -n "multizone1" -- \
+    --enable-cluster-autoscaler --zones "${LAB_ZONES[@]}" \
+    -c 1 --min-count 1 --max-count 20 -s "$LAB_NODE_SIZE" \
+    --labels "lab_ca=multizone1"
 
-# we provision a multizone nodepool
-if az aks nodepool show -g "$LAB_RG" --cluster-name "$LAB_AKSNAME" \
-    -n "multizone0" --query 'id' -otsv; then
-    echo "multizone0 nodepool already created"
-elif [[ $? == 3 ]]; then
-    set -e
-    az aks nodepool add -g "$LAB_RG" --cluster-name "$LAB_AKSNAME" \
-        --enable-cluster-autoscaler --zones 1 2 3 \
-        -n "multizone0" -c 0 --min-count 0 --max-count 20 -s "$LAB_NODE_SIZE" \
-        --labels "lab_ca=multizone0" \
-        --query 'id' -otsv
-    set +e
-else
-    echo "failed listing nodepool multizone0" && exit 1
-fi
+# we provision a multizone nodepool with 0 start node
+ensure_aks_nodepool -g "$LAB_RG" --cluster-name "$LAB_AKS_NAME" -n "multizone0" -- \
+    --enable-cluster-autoscaler --zones "${LAB_ZONES[@]}" \
+    -c 0 --min-count 0 --max-count 20 -s "$LAB_NODE_SIZE" \
+    --labels "lab_ca=multizone0"
 
-if az aks nodepool show -g "$LAB_RG" --cluster-name "$LAB_AKSNAME" \
-    -n "singlezone0" --query 'id' -otsv; then
-    echo "singlezone0 nodepool already created"
-elif [[ $? == 3 ]]; then
-    set -e
-    az aks nodepool add -g "$LAB_RG" --cluster-name "$LAB_AKSNAME" \
-        --enable-cluster-autoscaler --zones 1 \
-        -n "singlezone0" -c 0 --min-count 0 --max-count 20 -s "$LAB_NODE_SIZE" \
-        --labels "lab_ca=singlezone0" \
-        --query 'id' -otsv
-    set +e
-else
-    echo "failed listing nodepool singlezone0" && exit 1
-fi
+# we provision a singlezone nodepool with 0 start node
 
-# for zone in {1..3}; do
-#     # we provision a AzureLinux nodepool
-#     poolname="singlezone$zone"
-#     if az aks nodepool show -g "$LAB_RG" --cluster-name "$LAB_AKSNAME" \
-#         -n "$poolname" --query 'id' -otsv; then
-#         echo "$poolname nodepool already created"
-#     elif [[ $? == 3 ]]; then
-#         set -e
-#         az aks nodepool add -g "$LAB_RG" --cluster-name "$LAB_AKSNAME" \
-#             --enable-cluster-autoscaler --zones "$zone" \
-#             -n "$poolname" -c 1 --min-count 1 --max-count 20 \
-#             -s "$LAB_NODE_SIZE" \
-#             --labels "lab_ca=singlezone" \
-#             --query 'id' -otsv
-#         set +e
-#     else
-#         echo "failed listing nodepool $poolname" && exit 1
-#     fi
-# done
+ensure_aks_nodepool -g "$LAB_RG" --cluster-name "$LAB_AKS_NAME" -n "singlezone0" -- \
+    --enable-cluster-autoscaler --zones "${LAB_ZONES[0]}" \
+    -c 0 --min-count 0 --max-count 20 -s "$LAB_NODE_SIZE" \
+    --labels "lab_ca=singlezone0"
 
-az aks get-credentials -g "$LAB_RG" -n "$LAB_AKSNAME" -f "kubeconfig"
-
-KUBECONFIG="`realpath kubeconfig`"
+az aks get-credentials -g "$LAB_RG" -n "$LAB_AKS_NAME" -f "$LAB_KUBECONFIG" --overwrite-existing
 
 tee access-instructions.md << EOF
 To access the AKS cluster via kubectl:
 \`\`\`
-export KUBECONFIG="$KUBECONFIG"
+export KUBECONFIG="$LAB_KUBECONFIG"
 \`\`\`
 EOF
