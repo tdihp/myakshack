@@ -1,6 +1,5 @@
 #!/bin/bash
 . ./utils.bash
-SCRIPTDIR=$(dirname -- $(realpath -- "${BASH_SOURCE[0]}"))
 
 makeenv() {
     LAB_SUBSCRIPTION=$(az account show --query 'id' -otsv)  # used in tf

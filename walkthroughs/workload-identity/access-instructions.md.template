@@ -3,7 +3,6 @@ Provisioning succeeded!
 To access the lab environment:
 
 ```
-SCRIPTDIR="$SCRIPTDIR"
 . "$SCRIPTDIR/env.sh"
 export KUBECONFIG="$LAB_KUBECONFIG"
 ```
