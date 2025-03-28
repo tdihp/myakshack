@@ -18,6 +18,8 @@ kind 0.27.0, with below node images so far:
 
 * kindest/node:v1.29.14
 * kindest/node:v1.30.10
+* kindest/node:v1.31.6
+* kindest/node:v1.32.2
 
 ```shell
 # provisioning environemnt
@@ -36,7 +38,9 @@ nodes:
 - role: worker
 EOF
 # kind create cluster -n phantompod --image kindest/node:v1.29.14 --config kind.config --kubeconfig phantompod.kubeconfig
-kind create cluster -n phantompod --image kindest/node:v1.30.10 --config kind.config --kubeconfig phantompod.kubeconfig
+# kind create cluster -n phantompod --image kindest/node:v1.30.10 --config kind.config --kubeconfig phantompod.kubeconfig
+# kind create cluster -n phantompod --image kindest/node:v1.31.6 --config kind.config --kubeconfig phantompod.kubeconfig
+kind create cluster -n phantompod --image kindest/node:v1.32.2 --config kind.config --kubeconfig phantompod.kubeconfig
 export KUBECONFIG="$PWD/phantompod.kubeconfig"
 
 # just in case I want to fiddle around with my shortcuts
