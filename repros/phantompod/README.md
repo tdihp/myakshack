@@ -1,5 +1,23 @@
+# Phantom pod -- phantom pain, but with lost pods
+
 This describes and reproduces a "phantom pod" situation with a bare minimun
-kind cluster. kind 0.27.0 is used.
+kind cluster.
+
+In one of our kubernetes cluster investigations, a deployment gets scheduled
+to a node, then kubelet complains with "OutOfcpu". We followed a lead that
+kubelet keeps logging 'pod "{podname}" not found' in token_manager, and found
+a pod that "disappeared". We then noticed etcd was restored to a previous state
+right after the pod creation. This is an effort to consolidate and validate
+our theory that a "phantom" pod due to etcd restore will be lingered on kubelet
+without restarting, and cause validation errors on entring kubelet.
+
+## Reproduction steps
+
+The steps below requires bash, kubectl, docker and kind, validated on
+kind 0.27.0, with below node images so far:
+
+* kindest/node:v1.29.14
+* kindest/node:v1.30.10
 
 ```shell
 # provisioning environemnt
@@ -17,51 +35,58 @@ nodes:
         v: "6"
 - role: worker
 EOF
+# kind create cluster -n phantompod --image kindest/node:v1.29.14 --config kind.config --kubeconfig phantompod.kubeconfig
+kind create cluster -n phantompod --image kindest/node:v1.30.10 --config kind.config --kubeconfig phantompod.kubeconfig
+export KUBECONFIG="$PWD/phantompod.kubeconfig"
 
-kind create cluster -n phantompod --image kindest/node:v1.29.14 --config kind.config
+# just in case I want to fiddle around with my shortcuts
 alias k='kubectl --context kind-phantompod'
 alias kk='kubectl --context kind-phantompod -n kube-system'
-# to make sure we have all components ready
-k wait --for='jsonpath={.status.conditions[?(@.type=="Ready")].status}=True' node/phantompod-control-plane
-k get node
-kk get pods -owide
 
-# we create a deployment with 0 replicas
-k apply -f- <<EOF
+# to make sure we have all components ready
+kubectl wait --for='jsonpath={.status.conditions[?(@.type=="Ready")].status}=True' node/phantompod-control-plane
+kubectl get node
+kubectl -n kube-system get pods -owide
+
+# we use half of node CPU capacity so the node can only take 1, not 2 pods
+NODECPUS=$(kubectl get node phantompod-worker -ojsonpath='{.status.capacity.cpu}')
+DEPLOYMENT_TEMPLATE=$(cat <<EOF
 apiVersion: apps/v1
 kind: Deployment
 metadata:
-  name: phantom
+  name: "\$APP"
   labels:
-    app: phantom
+    app: "\$APP"
 spec:
-  replicas: 0
+  replicas: \$REPLICAS
   selector:
     matchLabels:
-      app: phantom
+      app: "\$APP"
   template:
     metadata:
       labels:
-        app: phantom
+        app: "\$APP"
     spec:
-      nodeSelector:
-        kubernetes.io/hostname: phantompod-worker
       containers:
-      - name: phantom
+      - name: "\$APP"
         image: busybox:1.37-musl
         command: [sleep, infinity]
         resources:
           requests:
-            cpu: 2
+            cpu: $((NODECPUS/2))
 EOF
+)
+APP=phantom REPLICAS=0 envsubst <<<"$DEPLOYMENT_TEMPLATE" | kubectl apply -f-
 sleep 1
 # we take etcd snapshot
-kk exec -it etcd-phantompod-control-plane -- sh -c 'ETCDCTL_API=3 etcdctl --endpoints=https://127.0.0.1:2379 \
+kubectl -n kube-system exec -it etcd-phantompod-control-plane -- sh -c 'ETCDCTL_API=3 etcdctl --endpoints=https://127.0.0.1:2379 \
   --cacert=/etc/kubernetes/pki/etcd/ca.crt --cert=/etc/kubernetes/pki/etcd/peer.crt --key=/etc/kubernetes/pki/etcd/peer.key \
   snapshot save /backup1.data'
-k scale --replicas 3 deployment/phantom
-# k get deploy phantom
-k rollout status deployment/phantom
+
+# we then introduce the phantom pod
+kubectl scale --replicas 1 deployment/phantom
+# kubectl get deploy phantom
+kubectl rollout status deployment/phantom
 
 # we exec into the docker node, pause etcd, remove data of /var/lib/etcd/member,
 # restore, then bounce etcd
@@ -76,7 +101,7 @@ runc --root /run/containerd/runc/k8s.io kill "$containerid" KILL
 
 sleep 3
 # we verify if deployment gets restored to 0 replicas
-k get deploy 
+kubectl get deploy 
 
 # we bounce kube-apiserver kube-scheduler and kube-controller-manager
 # but not kubelet
@@ -92,41 +117,14 @@ sleep 20
 bounce kube-controller-manager
 sleep 20
 '
-k get deploy
 
-sleep 10
-kk get pod
+# we visually verify if control plane components restarted and working
+kubectl -n kube-system get pod
 
-k apply -f- <<EOF
-apiVersion: apps/v1
-kind: Deployment
-metadata:
-  name: culprit
-  labels:
-    app: culprit
-spec:
-  replicas: 3
-  selector:
-    matchLabels:
-      app: culprit
-  template:
-    metadata:
-      labels:
-        app: culprit
-    spec:
-      nodeSelector:
-        kubernetes.io/hostname: phantompod-worker
-      containers:
-      - name: culprit
-        image: busybox:1.37-musl
-        command: [sleep, infinity]
-        resources:
-          requests:
-            cpu: 2
-EOF
-
-sleep 5
-k get pods -owide
+# we introduce a "culprit pod" that should trigger OutOfcpu
+APP=culprit REPLICAS=1 envsubst <<<"$DEPLOYMENT_TEMPLATE" | kubectl apply -f-
+sleep 10  # allow controllers to breathe
+kubectl get pods -owide
 ```
 
 One should see repro like below on the get pod:
