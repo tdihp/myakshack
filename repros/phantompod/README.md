@@ -36,6 +36,12 @@ nodes:
       extraArgs:
         v: "6"
 - role: worker
+  kubeadmConfigPatches:
+  - |
+    kind: JoinConfiguration
+    nodeRegistration:
+      kubeletExtraArgs:
+        v: "4"
 EOF
 # kind create cluster -n phantompod --image kindest/node:v1.29.14 --config kind.config --kubeconfig phantompod.kubeconfig
 # kind create cluster -n phantompod --image kindest/node:v1.30.10 --config kind.config --kubeconfig phantompod.kubeconfig
