@@ -11,6 +11,9 @@ right after the pod creation. This is an effort to consolidate and validate
 our theory that a "phantom" pod due to etcd restore will be lingered on kubelet
 without restarting, and cause validation errors on entring kubelet.
 
+Follow up: as suggested by https://github.com/kubernetes/kubernetes/issues/131115#issuecomment-2781283619,
+adding `--bump-revision 1000000000 --mark-compacted` seem to help.
+
 ## Reproduction steps
 
 The steps below requires bash, kubectl, docker and kind, validated on
@@ -105,7 +108,10 @@ containerid=$(crictl ps --name etcd -o json | jq -r ".containers[0].id")
 runc --root /run/containerd/runc/k8s.io pause "$containerid"
 rm -rf /var/lib/etcd/member
 ls /var/lib/etcd
+# REPRO
 ETCDCTL_API=3 nsenter -m -t $(pgrep etcd) etcdctl --data-dir /var/lib/etcd snapshot restore /backup1.data
+# NO-REPRO
+# ETCDCTL_API=3 nsenter -m -t $(pgrep etcd) etcdctl --data-dir /var/lib/etcd snapshot restore /backup1.data --bump-revision 1000000000 --mark-compacted
 runc --root /run/containerd/runc/k8s.io kill "$containerid" KILL
 '
 
