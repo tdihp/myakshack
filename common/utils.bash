@@ -1,6 +1,6 @@
 # common utilities in this repository
 
-SCRIPTDIR=$(dirname -- $(realpath -- "${BASH_SOURCE[0]}"))
+SCRIPTDIR=$(dirname -- $(realpath -- "$0"))
 
 # get a "safe" AKS minor version, i.e., the 2nd latest GA minor version
 aksversion() {
@@ -31,6 +31,50 @@ exportenv() {
     local -a vars
     mapfile -t vars <<<$(declare -g | grep -Poe "$GETENV_PATTERN")
     export "${vars[@]}"
+}
+
+# ensure a azure resource exists with az <resource> show, create if not existing
+# usage: ensure_resource [options] <resource ..> -- [creation-command] <creation-args ...>
+# options:
+#  -s showcmd   command for show, default to "show"
+#  -c createcmd command for create, default to "create"
+# example:
+#  ensure_resource network private-dns -n my.privatedns.net -g rg
+#  ensure_resource network dns -n my.public.net -g rg -- create -p public.net
+ensure_resource() {
+    local showcmd="show"
+    local createcmd="create"
+    while [ "$#" -gt 0 ]; do
+        case "$1" in
+            "-s") showcmd="$2"; shift 2 ;;
+            "-c") createcmd="$2"; shift 2 ;;
+            *) break ;;
+        esac
+    done
+    local -a resource
+    while [ "$#" -gt 0 ]; do
+        case "$1" in
+            -*) break ;;
+            ?*) resource+=("$1"); shift ;;
+            *) break ;;
+        esac
+    done
+    local -a queryargs
+    while [ "$#" -gt 0 ]; do
+        case "$1" in
+            --) shift; break ;;
+            ?*) queryargs+=("$1"); shift ;;
+            *) break ;;
+        esac
+    done
+    # create if not existing
+    if az "${resource[@]}" "$showcmd" "${queryargs[@]}" -onone; then
+        echo "resource already created"
+    elif [[ $? == 3 ]]; then
+        az "${resource[@]}" "$createcmd" "${queryargs[@]}" "$@" -onone
+    else
+        echo 'showing resource failed' && exit 1
+    fi
 }
 
 # ensure aks up and running, create if not existing, start if stopped
@@ -75,4 +119,14 @@ ensure_aks_nodepool() {
     else
         echo 'showing nodepool failed' && exit 1
     fi
+}
+
+# generate a random password
+# usage: passgen [length]
+passgen() {
+    local PASSLEN=16
+    if [ -n "$1" ]; then
+        PASSLEN="$1"
+    fi
+    </dev/random tr -dc 'A-Za-z0-9!"#$%&'"'"'()*+,-./:;<=>?@[]^_`{|}~' | head -c "$PASSLEN"
 }
