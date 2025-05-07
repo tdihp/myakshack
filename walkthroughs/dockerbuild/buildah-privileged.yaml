@@ -1,0 +1,44 @@
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: dockerbuild-buildah-privileged
+  labels:
+    app: dockerbuild
+spec:
+  template:
+    spec:
+      terminationGracePeriodSeconds: 0
+      restartPolicy: Never
+      initContainers:
+      - name: prepare
+        image: busybox:1.37
+        command:
+          - sh
+          - -c
+          - "echo -e 'FROM alpine\nRUN apk add gcc\n' > /workspace/Dockerfile"
+        securityContext:
+          runAsUser: 1000
+          runAsGroup: 1000
+        volumeMounts:
+          - name: workspace
+            mountPath: /workspace
+      containers:
+      - name: buildah
+        image: quay.io/buildah/stable:v1.39
+        # command: [buildah, build, /workspace]
+        command: [sleep, inf]
+        securityContext:
+          privileged: true
+          seccompProfile:
+            type: Unconfined
+          appArmorProfile:  # required for running mount
+            type: Unconfined
+        volumeMounts:
+          - name: workspace
+            readOnly: true
+            mountPath: /workspace
+      volumes: 
+        - name: workspace
+          emptyDir: {}
+        - name: varlibcontainers
+          emptyDir: {}

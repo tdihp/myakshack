@@ -1,0 +1,68 @@
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: dockerbuild-dind-rootless-sidecar
+  labels:
+    app: dockerbuild
+spec:
+  template:
+    spec:
+      terminationGracePeriodSeconds: 0
+      restartPolicy: Never
+      initContainers:
+      - name: prepare
+        image: busybox:1.37
+        command:
+          - sh
+          - -c
+          - "echo -e 'FROM alpine\nRUN apk add gcc\n' > /workspace/Dockerfile"
+        securityContext:
+          runAsUser: 1000
+          runAsGroup: 1000
+        volumeMounts:
+          - name: workspace
+            mountPath: /workspace
+      # https://kubernetes.io/docs/concepts/workloads/pods/sidecar-containers/
+      - name: dind
+        image: docker:28-dind-rootless
+        restartPolicy: Always
+        securityContext:
+          privileged: true  # still needed according to official doc
+          runAsUser: 1000
+          runAsGroup: 1000
+        startupProbe:
+          exec:
+            command: ["/usr/local/bin/docker", "-H", "unix:///run/user/1000/docker.sock", "info"]
+          initialDelaySeconds: 3
+          periodSeconds: 1
+          failureThreshold: 10
+        volumeMounts: 
+          - mountPath: /run/user
+            name: dockerd
+      containers:
+      - name: docker
+        image: docker:28-cli
+        volumeMounts:
+          - mountPath: /run/user
+            name: dockerd
+          - mountPath: /workspace
+            readOnly: true
+            name: workspace
+        env:
+          # this is needed since by default rootless uses /run/user/1000/docker.sock
+          - name: DOCKER_HOST
+            value: unix:///run/user/1000/docker.sock
+          - name: HOME
+            value: /tmp
+        command: [docker, build, /workspace]
+        securityContext:
+          runAsUser: 1000
+          runAsGroup: 1000  # or 102374, the group id of unix:///run/user/1000/docker.sock
+          capabilities:
+            drop:
+              - ALL
+      volumes: 
+        - name: dockerd
+          emptyDir: {}
+        - name: workspace
+          emptyDir: {}

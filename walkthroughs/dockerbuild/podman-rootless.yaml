@@ -1,0 +1,48 @@
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: dockerbuild-podman-rootless
+  labels:
+    app: dockerbuild
+spec:
+  template:
+    spec:
+      terminationGracePeriodSeconds: 0
+      restartPolicy: Never
+      initContainers:
+      - name: prepare
+        image: busybox:1.37
+        command:
+          - sh
+          - -c
+          - "echo -e 'FROM alpine\nRUN apk add gcc\n' > /workspace/Dockerfile"
+        securityContext:
+          runAsUser: 1000
+          runAsGroup: 1000
+        volumeMounts:
+          - name: workspace
+            mountPath: /workspace
+      containers:
+      - name: podman
+        image: quay.io/podman/stable:v5.4
+        command: [podman, build, /workspace]
+        securityContext:
+          runAsUser: 1000
+          runAsGroup: 1000
+          seccompProfile:
+            type: Unconfined
+          appArmorProfile:  # required for running mount
+            type: Unconfined
+          capabilities:
+            drop:
+              - ALL
+            add:
+              - SETGID
+              - SETUID
+        volumeMounts:
+          - name: workspace
+            readOnly: true
+            mountPath: /workspace
+      volumes: 
+        - name: workspace
+          emptyDir: {}

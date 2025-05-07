@@ -1,0 +1,63 @@
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: dockerbuild-dind-sidecar
+  labels:
+    app: dockerbuild
+spec:
+  template:
+    spec:
+      terminationGracePeriodSeconds: 0
+      restartPolicy: Never
+      initContainers:
+      - name: prepare
+        image: busybox:1.37
+        command:
+          - sh
+          - -c
+          - "echo -e 'FROM alpine\nRUN apk add gcc\n' > /workspace/Dockerfile"
+        securityContext:
+          runAsUser: 1000
+          runAsGroup: 1000
+        volumeMounts:
+          - name: workspace
+            mountPath: /workspace
+      # https://kubernetes.io/docs/concepts/workloads/pods/sidecar-containers/
+      - name: dind
+        image: docker:28-dind
+        restartPolicy: Always
+        securityContext:
+          privileged: true
+        startupProbe:
+          exec:
+            command: ["/usr/local/bin/docker", "info"]
+          initialDelaySeconds: 3
+          periodSeconds: 1
+          failureThreshold: 10
+        volumeMounts: 
+          - mountPath: /var/run 
+            name: dockerd
+      containers:
+      - name: docker
+        image: docker:28-cli
+        volumeMounts:
+          - mountPath: /var/run 
+            name: dockerd
+          - mountPath: /workspace
+            readOnly: true
+            name: workspace
+        env:
+          - name: HOME
+            value: /tmp
+        command: [docker, build, /workspace]
+        securityContext:
+          runAsUser: 2000   # any uid should work
+          runAsGroup: 2375  # gid of docker group
+          capabilities:
+            drop:
+              - ALL
+      volumes: 
+        - name: dockerd
+          emptyDir: {}
+        - name: workspace
+          emptyDir: {}
