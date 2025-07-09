@@ -136,7 +136,6 @@ def find_all_security_funcs(btf):
 bpf_text = r'''
 #include <uapi/linux/ptrace.h>
 #include <uapi/linux/bpf_perf_event.h>
-
 /* For older versions of bcc/libbpf, supports up to PT_REGS_PARM5 */
 #ifndef MAX_PT_REGS_ARGS
 #error "must define MAX_PT_REGS_ARGS"
@@ -478,7 +477,7 @@ cleanup:
 int security_enter_##name(struct pt_regs *ctx) {                            \
     const struct btf_argdef_t typev[] = {btfargs};                          \
     return func_enter(                                                      \
-        ctx, 1, id, SECURITY_ENTER_MSGTYPE, ___bpf_narg(btfargs), typev);   \
+        ctx, 1, id, SECURITY_ENTER_MSGTYPE, sizeof(typev) / sizeof(struct btf_argdef_t), typev);\
 }
 
 
@@ -494,7 +493,7 @@ LIST_SECURITY();
 int security_exit_##name(struct pt_regs *ctx) {                             \
     const struct btf_argdef_t typev[] = {btfargs};                          \
     return func_exit(                                                       \
-        ctx, 1, id, SECURITY_EXIT_MSGTYPE, ___bpf_narg(btfargs), typev);    \
+        ctx, 1, id, SECURITY_EXIT_MSGTYPE, sizeof(typev) / sizeof(struct btf_argdef_t), typev);\
 }
 
 LIST_SECURITY();
@@ -511,7 +510,7 @@ BPF_HASH(hook_hash, u32, struct ctx_t, 65536);
 int hook_enter_##name(struct pt_regs *ctx) {                                \
     const struct btf_argdef_t typev[] = {btfargs};                          \
     return func_enter(                                                      \
-        ctx, 2, id, HOOK_ENTER_MSGTYPE, ___bpf_narg(btfargs), typev);       \
+        ctx, 2, id, HOOK_ENTER_MSGTYPE, sizeof(typev) / sizeof(struct btf_argdef_t), typev);\
 }
 
 LIST_HOOK();
@@ -526,7 +525,7 @@ LIST_HOOK();
 int hook_exit_##name(struct pt_regs *ctx) {                                 \
     const struct btf_argdef_t typev[] = {btfargs};                          \
     return func_exit(                                                       \
-        ctx, 2, id, HOOK_EXIT_MSGTYPE, ___bpf_narg(btfargs), typev);        \
+        ctx, 2, id, HOOK_EXIT_MSGTYPE, sizeof(typev) / sizeof(struct btf_argdef_t), typev);\
 }
 
 LIST_HOOK();
@@ -749,15 +748,27 @@ def main():
         if new_nofile_soft < fdneeded:
             logger.info("current RLIMIT_NOFILE may still be not enough")
 
+    if not security_funcs:
+        logger.warning('no security_funcs found!')
+
     for t in security_funcs:
         logger.info('attaching %s', t[0])
-        b.attach_kprobe(event=t[0], fn_name='security_enter_' + t[0])
-        b.attach_kretprobe(event=t[0], fn_name='security_exit_' + t[0])
+        try:
+            b.attach_kprobe(event=t[0], fn_name='security_enter_' + t[0])
+            b.attach_kretprobe(event=t[0], fn_name='security_exit_' + t[0])
+        except Exception:
+            logger.exception('failed to attach %s', t[0])
+
+    if not hook_funcs:
+        logger.warning('no hook_funcs found!')
 
     for t in hook_funcs:
         logger.info('attaching %s', t[0])
-        b.attach_kprobe(event=t[0], fn_name='hook_enter_' + t[0])
-        b.attach_kretprobe(event=t[0], fn_name='hook_exit_' + t[0])
+        try:
+            b.attach_kprobe(event=t[0], fn_name='hook_enter_' + t[0])
+            b.attach_kretprobe(event=t[0], fn_name='hook_exit_' + t[0])
+        except Exception:
+            logger.exception('failed to attach %s', t[0])
 
     ctxid_tracker = ForgettableIndex() if args.found_level else None
     found_level = {'hook': msg_t.t.TYPE_HOOK, 'security': msg_t.t.TYPE_SECURITY}.get(args.found_level)
