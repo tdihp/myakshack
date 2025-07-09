@@ -6,19 +6,20 @@ Tracing script that snoops LSM hook activities
 
 EXAMPLES:
 
-* Capture all security evaluations for 10 seconds, for failures only
-$ python3 lsmsnoop -f -t 10
+* Capture all security evaluations for 10 seconds, for any security failures
+$ python3 lsmsnoop.py -f -t 10 --found-level=security
 
 * Capture indefinitely for a given pid
-$ python3 lsmsnoop -p 1234
+$ python3 lsmsnoop.py -p 1234
 
 * Capture only functions relevant to settime for syscall clock_settime, with
   detailed btf data
-$ python3 lsmsnoop -s clock_settime --hook-func settime --security-func settime -d
+$ python3 lsmsnoop.py -s clock_settime --hook-func settime --security-func settime -d
 
 CHANGELOG
 
 2025-07-08 Initial script
+2025-07-09 add --found-level
 
 Copyright (c) 2025, Ping He.
 License: MIT
@@ -36,6 +37,7 @@ import resource
 import logging
 import threading
 import errno
+import heapq
 
 from bcc.syscall import syscalls, syscall_name
 logger = logging.getLogger()
@@ -442,8 +444,10 @@ static inline int func_exit(
     if(ctx_p->id != id)
         return 0;
 
+    int retval = (int)PT_REGS_RC(ctx);
 #ifdef FAILURE_ONLY
-    if(PT_REGS_RC(ctx) >= 0)
+    if(retval >= 0)
+        /* this is to work around "jump out of range" compiler issue*/
         goto cleanup;
 #endif
     if(msgtype) {
@@ -453,7 +457,7 @@ static inline int func_exit(
         msg->type = msgtype;
         fill_msg(msg);
         msg->ctx_stack = *stack_p;
-        msg->retval = (int)PT_REGS_RC(ctx);
+        msg->retval = retval;
 #ifdef BTF_DETAIL
         fill_btf_params(msg, argc, &ctx_p->args[0], typev);
 #endif
@@ -585,6 +589,38 @@ class BPFNoLimit(BPF):
     def _check_probe_quota(self, num_new_probes):
         pass
 
+
+class ForgettableIndex(object):
+    """add or lookup keys in index, remember a integer value entry,
+    forget all items once when value entry small than a given number
+    """
+    def __init__(self):
+        self._heap = []
+        self._set = set()
+        self._lock = threading.Lock()
+
+    def insert(self, key, version):
+        with self._lock:
+            if key not in self._set:
+                logger.debug('added %s at %s', key, version)
+                heapq.heappush(self._heap, (version, key))
+                self._set.add(key)
+
+    def __contains__(self, key):
+        with self._lock:
+            return key in self._set
+
+    __setitem__ = insert
+
+    def forget(self, version):
+        """forget all entries with value smaller than version"""
+        with self._lock:
+            while self._heap and self._heap[0][0] <= version:
+                v, k = heapq.heappop(self._heap)
+                self._set.discard(k)
+                logger.debug('forgot %s', k)
+
+
 def main():
     import argparse
     parser = argparse.ArgumentParser(
@@ -608,14 +644,20 @@ def main():
                         help='capture failures only '
                         'by default this tool captures all LSM relevant '
                         'function calls, even those with void return type')
+    parser.add_argument('--found-level', choices=('security', 'hook'),
+                        help='only print calls when security or hook context '
+                        'found, choices are "security" and "hook"')
     parser.add_argument('-t', '--timeout', type=int, help='seconds to capture '
                         'before quiting')
     parser.add_argument('-d', '--btf-detail', action='store_true',
                         help='include expanded btf detail')
     parser.add_argument('--bpf', action='store_true',
                         help='print bpf code and quit')
+    parser.add_argument('-v', '--verbose', action='store_true',
+                        help='show debug logs')
     args = parser.parse_args()
-
+    if args.verbose:
+        logger.setLevel(logging.DEBUG)
     btf = get_btf()
     # int_type_id = next(for d in btf.values() if d[])
     # list(find_all_security_hook_defs(btf))
@@ -685,7 +727,7 @@ def main():
     if args.bpf:
         print(bpf_text_rendered)
         return 0
-
+    # import bcc
     # b = BPF(text=bpf_text_rendered, debug=bcc.DEBUG_SOURCE)
     b = BPFNoLimit(text=bpf_text_rendered)
     first_ts = BPF.monotonic_time()
@@ -708,21 +750,18 @@ def main():
 
     for t in security_funcs:
         logger.info('attaching %s', t[0])
-        try:
-            b.attach_kprobe(event=t[0], fn_name='security_enter_' + t[0])
-            b.attach_kretprobe(event=t[0], fn_name='security_exit_' + t[0])
-        except Exception as e:
-            logger.exception('error when attaching security kprobes for %s', t[0])
+        b.attach_kprobe(event=t[0], fn_name='security_enter_' + t[0])
+        b.attach_kretprobe(event=t[0], fn_name='security_exit_' + t[0])
 
     for t in hook_funcs:
         logger.info('attaching %s', t[0])
-        try:
-            b.attach_kprobe(event=t[0], fn_name='hook_enter_' + t[0])
-            b.attach_kretprobe(event=t[0], fn_name='hook_exit_' + t[0])
-        except Exception as e:
-            logger.exception('error when attaching hook kprobes for %s', t[0])
+        b.attach_kprobe(event=t[0], fn_name='hook_enter_' + t[0])
+        b.attach_kretprobe(event=t[0], fn_name='hook_exit_' + t[0])
 
-    # return
+    ctxid_tracker = ForgettableIndex() if args.found_level else None
+    found_level = {'hook': msg_t.t.TYPE_HOOK, 'security': msg_t.t.TYPE_SECURITY}.get(args.found_level)
+    recent_time = 0
+    TRACKER_GAP = int(5 * 1e9)  # we keep ctx_id for 5 seconds
 
     def reltime(ts_ns):
         return 1e-9 * (ts_ns - first_ts)
@@ -731,6 +770,7 @@ def main():
         return reltime(ts_ns) + first_ts_real
 
     def callback(cpu, data, size, timefmt="%H:%M:%S.%f"):
+        nonlocal ctxid_tracker, recent_time, found_level
         event = ct.cast(data, ct.POINTER(msg_t)).contents
 
         # for each event, we print:
@@ -742,6 +782,18 @@ def main():
         DIRSTR = {event.t.TYPE_ENTER: '>', event.t.TYPE_EXIT: '<'}
         direction = event.type & event.t.TYPEMASK_DIR
         level = event.type & event.t.TYPEMASK_LEVEL
+
+        recent_time = max(event.time, recent_time)
+        if found_level:
+            if level >= found_level:
+                for i in range(level-1):
+                    l = event.levels[i]
+                    ctxid_tracker[(i + 1, l.ctx_id)] = l.time
+            else:
+                if (level, event.levels[level-1].ctx_id) not in ctxid_tracker:
+                    logger.debug('ignore ctx_id %s, %s', level, event.levels[level-1].ctx_id)
+                    return
+
         header = {
             'time': datetime.fromtimestamp(clocktime(event.time)).strftime(timefmt),
             'comm': event.comm.decode('ascii'),
@@ -805,10 +857,10 @@ def main():
     running = 1
     def _callback(cpu, data, size, **kw):
         # this wrapper is needed to avoid blocking of ctrl-c.
-        nonlocal running
-        if not running:
-            return
         try:
+            nonlocal running
+            if not running:
+                return
             callback(cpu, data, size, **kw)
         except KeyboardInterrupt:
             logger.warning('callback interrupted')
@@ -830,12 +882,17 @@ def main():
     logger.debug('opened fd count: %d', len(os.listdir('/proc/self/fd')))
     while running:
         try:
-            b.perf_buffer_poll()
+            b.perf_buffer_poll(timeout=100)
+            if ctxid_tracker and recent_time:
+                ctxid_tracker.forget(recent_time - TRACKER_GAP)
         except KeyboardInterrupt:
             logger.info('loop interrupted')
             exit()
 
 
 if __name__ == '__main__':
-    logging.basicConfig(level=logging.DEBUG)
-    main()
+    logging.basicConfig(level=logging.INFO)
+    try:
+        main()
+    finally:
+        logger.info('ending execution, this can take a while')
