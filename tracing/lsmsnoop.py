@@ -2,7 +2,8 @@
 # -*- coding: utf-8 -*-
 
 """
-Tracing script that snoops LSM hook activities
+Tracing script that snoops LSM hook activities, inspired by
+https://github.com/cilium/pwru and https://github.com/lumontec/lsmtrace
 
 EXAMPLES:
 
