@@ -8,7 +8,7 @@ https://github.com/cilium/pwru and https://github.com/lumontec/lsmtrace
 EXAMPLES:
 
 * Capture all security evaluations for 10 seconds, for any security failures
-$ python3 lsmsnoop.py -feperm -t 10 --found-level=security
+$ python3 lsmsnoop.py -feperm -t 10 --propagate-found
 
 * Capture indefinitely for a given pid
 $ python3 lsmsnoop.py -p 1234
