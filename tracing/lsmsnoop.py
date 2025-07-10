@@ -8,7 +8,7 @@ https://github.com/cilium/pwru and https://github.com/lumontec/lsmtrace
 EXAMPLES:
 
 * Capture all security evaluations for 10 seconds, for any security failures
-$ python3 lsmsnoop.py -f -t 10 --found-level=security
+$ python3 lsmsnoop.py -feperm -t 10 --found-level=security
 
 * Capture indefinitely for a given pid
 $ python3 lsmsnoop.py -p 1234
@@ -21,7 +21,8 @@ CHANGELOG
 
 2025-07-08 Initial script
 2025-07-09 add --found-level
-
+2025-07-10 --failure-only now can optionally specify errno
+           rename found-level to propagate-found, move impl into ebpf
 Copyright (c) 2025, Ping He.
 License: MIT
 """
@@ -170,8 +171,8 @@ bpf_text = r'''
  * We may want to extend this in future so we won't keep everything until
  * syscall complete.
  */
+#define LEVELS              3
 #define TYPEMASK_LEVEL      3
-
 #define TYPE_SYSCALL        1
 #define TYPE_SECURITY       2
 #define TYPE_HOOK           3
@@ -197,6 +198,8 @@ static inline u64 counters_inc(unsigned key) {
         return 0;
     (*count_p) += 1;
     result |= *count_p;
+    // 16 bit level, 16bit cpuid, 32bit counter
+    result |= (u64)(key + 1) << 48;
     return result;
 }
 
@@ -208,7 +211,7 @@ struct ctx_t {
 };
 
 struct ctx_stack_t {
-    struct ctx_t levels[3];
+    struct ctx_t levels[LEVELS];
 };
 
 struct msg_t {
@@ -271,6 +274,10 @@ static inline void trace(void *ctx, const char *text) {
 
 BPF_HASH(ctxstack, u32, struct ctx_stack_t, 65536);
 
+#ifdef PROPAGATE_FOUND
+BPF_TABLE("lru_hash", u64, u64, found_ctx, 4096);
+#endif
+
 static inline struct ctx_stack_t *get_context(u32 pid) {
     struct ctx_stack_t zero = {};
     return ctxstack.lookup_or_try_init(&pid, &zero);
@@ -314,27 +321,45 @@ TRACEPOINT_PROBE(raw_syscalls, sys_exit) {
     u64 pid_tgid = bpf_get_current_pid_tgid();
     u32 tgid = pid_tgid >> 32;
     u32 pid = (u32)pid_tgid;
-#ifdef SEND_SYSCALL_EXIT
     struct ctx_stack_t *stack_p = ctxstack.lookup(&pid);
     if (!stack_p)
         return 0;
     if (stack_p->levels[0].id != args->id)
         /* we might have mistaken, not the same syscall */
         goto cleanup;
-#ifdef FAILURE_ONLY
-    if(args->ret >= 0)
+
+#ifdef PROPAGATE_FOUND
+    if (found_ctx.lookup(&stack_p->levels[0].ctx_id))
+    {
+        found_ctx.delete(&stack_p->levels[0].ctx_id);
+        goto propagate;
+    } else
         goto cleanup;
+#endif /* PROPAGATE_FOUND */
+
+#ifdef FAILURE_ONLY
+    if(
+#if (FAILURE_ONLY == 0)
+        args->ret >= 0
+#else
+        args->ret != -FAILURE_ONLY
 #endif
-    struct msg_t *msg = get_scratch();
+    )
+        goto cleanup;
+        
+#endif /* FAILURE_ONLY */
+    struct msg_t *msg; /* seems I cannot label declaration */
+propagate:
+#ifdef SEND_SYSCALL_EXIT
+    msg = get_scratch();
     if (!msg)
         goto cleanup;
     msg->type = TYPE_SYSCALL | TYPE_EXIT;
     fill_msg(msg);
     msg->ctx_stack = *stack_p;
-
     msg->retval = args->ret;
     events.perf_submit(args, msg, sizeof(*msg));
-#endif
+#endif /* SEND_SYSCALL_EXIT */
 cleanup:
     /* we just remove the ctx here */
     ctxstack.delete(&pid);
@@ -349,8 +374,6 @@ cleanup:
     (unsigned long long)PT_REGS_PARM4(ctx),\
     (unsigned long long)PT_REGS_PARM5(ctx)\
 }
-
-BPF_HASH(security_hash, u32, struct ctx_t, 65536);
 
 struct btf_argdef_t {
     u32 type_id;
@@ -445,10 +468,29 @@ static inline int func_exit(
         return 0;
 
     int retval = (int)PT_REGS_RC(ctx);
+#ifdef PROPAGATE_FOUND
+    /* flagged by next level always wins */
+    if (level != (LEVELS - 1)) {
+        if (found_ctx.lookup(&ctx_p->ctx_id)) {
+            found_ctx.delete(&ctx_p->ctx_id);
+            goto propagate;
+        }
+    }
+#endif /* PROPAGATE_FOUND */
 #ifdef FAILURE_ONLY
-    if(retval >= 0)
-        /* this is to work around "jump out of range" compiler issue*/
+    if (
+#if FAILURE_ONLY == 0
+        retval >= 0
+#else
+        retval != -FAILURE_ONLY
+#endif
+    )
         goto cleanup;
+#endif /* FAILURE_ONLY */
+#ifdef PROPAGATE_FOUND
+propagate:
+    /* we just mark the upper level only */
+    found_ctx.insert(&stack_p->levels[level-1].ctx_id, &stack_p->levels[level-1].time);
 #endif
     if(msgtype) {
         struct msg_t *msg = get_scratch();
@@ -566,9 +608,6 @@ def get_msg_t(
             ('uid',             ct.c_uint32),
             ('comm',            ct.c_char * 16),
             ('levels',          ctx_t * 3),
-            # ('syscall_ctx',     ctx_t),
-            # ('security_ctx',    ctx_t),
-            # ('hook_ctx',        ctx_t),
             ('retval',          ct.c_int),
             ('u',               _U),
         ]
@@ -590,37 +629,6 @@ class BPFNoLimit(BPF):
         pass
 
 
-class ForgettableIndex(object):
-    """add or lookup keys in index, remember a integer value entry,
-    forget all items once when value entry small than a given number
-    """
-    def __init__(self):
-        self._heap = []
-        self._set = set()
-        self._lock = threading.Lock()
-
-    def insert(self, key, version):
-        with self._lock:
-            if key not in self._set:
-                logger.debug('added %s at %s', key, version)
-                heapq.heappush(self._heap, (version, key))
-                self._set.add(key)
-
-    def __contains__(self, key):
-        with self._lock:
-            return key in self._set
-
-    __setitem__ = insert
-
-    def forget(self, version):
-        """forget all entries with value smaller than version"""
-        with self._lock:
-            while self._heap and self._heap[0][0] <= version:
-                v, k = heapq.heappop(self._heap)
-                self._set.discard(k)
-                logger.debug('forgot %s', k)
-
-
 def main():
     import argparse
     parser = argparse.ArgumentParser(
@@ -633,20 +641,19 @@ def main():
     parser.add_argument('-s', '--syscall',
                         help='complete name or octal ID of a Linux syscall to '
                         'capture, XXX: multiple syscalls can be added')
-    # parser.add_argument('-c', '--comm',
-    #                     help='trace only when comm of the process equals to '
-    #                     'given value')
     parser.add_argument('--security-func',
                         help='security function name regex pattern')
     parser.add_argument('--hook-func',
                         help='security hook function name regex pattern')
-    parser.add_argument('-f', '--failure-only', action='store_true',
-                        help='capture failures only '
-                        'by default this tool captures all LSM relevant '
-                        'function calls, even those with void return type')
-    parser.add_argument('--found-level', choices=('security', 'hook'),
-                        help='only print calls when security or hook context '
-                        'found, choices are "security" and "hook"')
+    parser.add_argument('-f', '--failure-only', nargs='?', const='ANY',
+                        type=lambda s: s.upper(),
+                        help='capture failures only, if by default capture all '
+                        'error with "-f", but can capture only specific error'
+                        'with "-f=EPERM", or "-f=1". With this flag, attaching '
+                        'to void function calls are skipped')
+    parser.add_argument('--propagate-found', action='store_true',
+                        help='only print syscall when security or hook found, '
+                        'use with function filters or failure filter')
     parser.add_argument('-t', '--timeout', type=int, help='seconds to capture '
                         'before quiting')
     parser.add_argument('-d', '--btf-detail', action='store_true',
@@ -659,15 +666,8 @@ def main():
     if args.verbose:
         logger.setLevel(logging.DEBUG)
     btf = get_btf()
-    # int_type_id = next(for d in btf.values() if d[])
-    # list(find_all_security_hook_defs(btf))
     security_funcs = list(find_all_security_funcs(btf))
     hook_funcs = list(find_all_security_hook_defs(btf))
-    # import json
-    # # print(json.dumps(collect_int_rettype_funcs()))
-    # btf = get_btf()
-    # list(find_all_security_hook_defs(btf))
-    # bpf_text_rendered = bpf_text
     bpfargs = {
         'max_pt_regs_args': 5,
         'max_syscall_args': 6,
@@ -705,7 +705,24 @@ def main():
         # we remove all void calls
         security_funcs = [(n, _i, ri, _a) for (n, _i, ri, _a) in security_funcs if ri != 0]
         hook_funcs = [(n, _i, ri, _a) for (n, _i, ri, _a) in hook_funcs if ri != 0]
-        bpfargs['FAILURE_ONLY'] = ''
+        if args.failure_only == 'ANY':
+            bpfargs['FAILURE_ONLY'] = 0
+        elif args.failure_only.startswith('E'):
+            e = 0
+            if args.failure_only.isdecimal():
+                e = int(args.failure_only)
+            else:
+                try:
+                    e = getattr(errno, args.failure_only.upper())
+                except KeyError:
+                    parser.error(f'unable to recognize "--failure-only" error {args.failure_only}')
+                bpfargs['FAILURE_ONLY'] = e
+                logger.debug('filtering with errno %d', e)
+        else:
+            parser.error(f'unable to recognize "--failure-only" error {args.failure_only}')
+
+    if args.propagate_found:
+        bpfargs['propagate_found'] = ''
 
     # print(security_funcs)
     # return
@@ -727,8 +744,8 @@ def main():
     if args.bpf:
         print(bpf_text_rendered)
         return 0
-    # import bcc
-    # b = BPF(text=bpf_text_rendered, debug=bcc.DEBUG_SOURCE)
+    import bcc
+    # b = BPF(text=bpf_text_rendered, debug=bcc.DEBUG_SOURCE|bcc.DEBUG_PREPROCESSOR)
     b = BPFNoLimit(text=bpf_text_rendered)
     first_ts = BPF.monotonic_time()
     first_ts_real = time.time()
@@ -770,11 +787,6 @@ def main():
         except Exception:
             logger.exception('failed to attach %s', t[0])
 
-    ctxid_tracker = ForgettableIndex() if args.found_level else None
-    found_level = {'hook': msg_t.t.TYPE_HOOK, 'security': msg_t.t.TYPE_SECURITY}.get(args.found_level)
-    recent_time = 0
-    TRACKER_GAP = int(5 * 1e9)  # we keep ctx_id for 5 seconds
-
     def reltime(ts_ns):
         return 1e-9 * (ts_ns - first_ts)
 
@@ -782,7 +794,7 @@ def main():
         return reltime(ts_ns) + first_ts_real
 
     def callback(cpu, data, size, timefmt="%H:%M:%S.%f"):
-        nonlocal ctxid_tracker, recent_time, found_level
+        # nonlocal ctxid_tracker, recent_time, PROPAGATE_FOUND
         event = ct.cast(data, ct.POINTER(msg_t)).contents
 
         # for each event, we print:
@@ -794,17 +806,6 @@ def main():
         DIRSTR = {event.t.TYPE_ENTER: '>', event.t.TYPE_EXIT: '<'}
         direction = event.type & event.t.TYPEMASK_DIR
         level = event.type & event.t.TYPEMASK_LEVEL
-
-        recent_time = max(event.time, recent_time)
-        if found_level:
-            if level >= found_level:
-                for i in range(level-1):
-                    l = event.levels[i]
-                    ctxid_tracker[(i + 1, l.ctx_id)] = l.time
-            else:
-                if (level, event.levels[level-1].ctx_id) not in ctxid_tracker:
-                    logger.debug('ignore ctx_id %s, %s', level, event.levels[level-1].ctx_id)
-                    return
 
         header = {
             'time': datetime.fromtimestamp(clocktime(event.time)).strftime(timefmt),
@@ -839,7 +840,6 @@ def main():
             ctx = {
                 'level': LEVELSTR[i+1],
                 'ctx_id': ctxdata.ctx_id,
-                # 'name': syscall_name(ctxdata.id).decode('ascii') if i==0 else fd['name'],
             }
             if i == 0:
                 nargs = bpfargs['max_syscall_args']
@@ -859,7 +859,7 @@ def main():
 
             ctx['params'] = params
             print(CTXFMT.format(**ctx))
-        
+
         if args.btf_detail and level != event.t.TYPE_SYSCALL:
             fd = btf[event.levels[level-1].id]
             argnames = [p['name'] for p in btf[fd['type_id']]['params']][:bpfargs['max_pt_regs_args']]
@@ -895,8 +895,6 @@ def main():
     while running:
         try:
             b.perf_buffer_poll(timeout=100)
-            if ctxid_tracker and recent_time:
-                ctxid_tracker.forget(recent_time - TRACKER_GAP)
         except KeyboardInterrupt:
             logger.info('loop interrupted')
             exit()
