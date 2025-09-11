@@ -130,3 +130,60 @@ passgen() {
     fi
     </dev/random tr -dc 'A-Za-z0-9!"#$%&'"'"'()*+,-./:;<=>?@[]^_`{|}~' | head -c "$PASSLEN"
 }
+
+# requesting VM jit, following https://github.com/Azure/azure-cli/issues/9855
+# usage: azure_vm_jit <rg> <location>
+azure_vm_jit_in_rg() {
+    # step 1: get my IP
+    local MYIP=$(curl -s https://ifconfig.me/ip)
+
+    # step 2: get all VMs in the RG for the location
+    local VM_IDS=$(az vm list -g "$1" --query "[?location=='$2'].id" -otsv)
+    [ -z "$VM_IDS" ] && echo "no VM found in $1 at $2" && return 0
+    local RESOURCEIDPREFIX="/subscriptions/$(az account show --query id -otsv)/resourceGroups/$1/providers/Microsoft.Security/locations/$2/jitNetworkAccessPolicies/default"
+    local APIVERSION="2015-06-01-preview"
+
+    # step 3: create or update the JIT policy
+    local POLICY_BODY=$(<<< "$VM_IDS" jq --slurp -R 'split("\n")[:-1] | {
+        kind: "Basic",
+        name: "default",
+        type: "Microsoft.Security/locations/jitNetworkAccessPolicies",
+        location: "'"$2"'",
+        properties: {
+            virtualMachines: map(
+                {
+                    id: .,
+                    ports: [{
+                        number: 22,
+                        allowedSourceAddressPrefix: "'"$MYIP"'/32",
+                        maxRequestAccessDuration: "PT3H",
+                        protocol: "*"
+                    }]
+                }
+            )
+        }
+    }')
+    az rest --method put --url "$RESOURCEIDPREFIX?api-version=2015-06-01-preview" --body "$POLICY_BODY" -onone
+    az resource wait --created --timeout 120 --interval 20 --ids "$RESOURCEIDPREFIX" --api-version "$APIVERSION"
+    [ $? != 0 ] && echo "JIT policy creation failed" && return 1
+    local INITIATE_BODY=$(<<< "$VM_IDS" jq --slurp -R 'split("\n")[:-1] | {
+        virtualMachines: map(
+            {
+                id: .,
+                ports: [{
+                    number: 22,
+                    duration: "PT3H",
+                    allowedSourceAddressPrefix: "'"$MYIP"'/32"
+                }]
+            }
+        ),
+        justification: "Just in time request via azure_vm_jit_in_rg"
+    }')
+    local STARTTIMEUTC=$(az rest --method post --url "$RESOURCEIDPREFIX/initiate?api-version=2015-06-01-preview" --body "$INITIATE_BODY" --query 'startTimeUtc' -otsv)
+    [ $? != 0 ] && echo "JIT initiate creation failed" && return 2
+    [ -z "$STARTTIMEUTC" ] && echo "JIT initiate, bad response" && return 3
+    local VMCNT=$(<<< "$VM_IDS" wc -l)
+    az resource wait --timeout 120 --interval 20 --ids "$RESOURCEIDPREFIX" --api-version "$APIVERSION" \
+      --custom "\`$VMCNT\`==length(properties.requests[?startTimeUtc=='$STARTTIMEUTC'].virtualMachines[].ports[?status!='Initiating'][])"
+    echo "jit request completed, result: $(az rest --method get --url "$RESOURCEIDPREFIX?api-version=2015-06-01-preview" --query 'properties.requests[?startTimeUtc==`'"$STARTTIMEUTC"'`].virtualMachines' -oyaml)"
+}
