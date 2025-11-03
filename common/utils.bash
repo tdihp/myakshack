@@ -40,7 +40,7 @@ exportenv() {
 #  -c createcmd command for create, default to "create"
 # example:
 #  ensure_resource network private-dns -n my.privatedns.net -g rg
-#  ensure_resource network dns -n my.public.net -g rg -- create -p public.net
+#  ensure_resource network dns -n my.public.net -g rg -- -p public.net
 ensure_resource() {
     local showcmd="show"
     local createcmd="create"
@@ -73,7 +73,7 @@ ensure_resource() {
     elif [[ $? == 3 ]]; then
         az "${resource[@]}" "$createcmd" "${queryargs[@]}" "$@" -onone
     else
-        echo 'showing resource failed' && exit 1
+        echo 'showing resource failed' >&2 && return 1
     fi
 }
 
@@ -81,7 +81,7 @@ ensure_resource() {
 # usage: reconcile_aks -g <rg> -n <name> -- <creation-args ...>
 ensure_aks_cluster() {
     local -a queryargs
-    while :; do
+    while [ "$#" -gt 0 ]; do
         case "$1" in
             --) shift; break ;;
             *) queryargs+=("$1") ;;
@@ -98,13 +98,13 @@ ensure_aks_cluster() {
     elif [[ $? == 3 ]]; then
         az aks create "${queryargs[@]}" "$@" -onone
     else
-        echo 'showing aks cluster failed' >&2 && exit 1
+        echo 'showing aks cluster failed' >&2 && return 1
     fi
 }
 
 ensure_aks_nodepool() {
     local -a queryargs
-    while :; do
+    while [ "$#" -gt 0 ]; do
         case "$1" in
             --) shift; break ;;
             *) queryargs+=("$1") ;;
@@ -117,7 +117,7 @@ ensure_aks_nodepool() {
     elif [[ $? == 3 ]]; then
         az aks nodepool add "${queryargs[@]}" "$@" -onone
     else
-        echo 'showing nodepool failed' && exit 1
+        echo 'showing nodepool failed' >&2 && return 1
     fi
 }
 
@@ -164,7 +164,7 @@ azure_vm_jit_in_rg() {
         }
     }')
     az rest --method put --url "$RESOURCEIDPREFIX?api-version=2015-06-01-preview" --body "$POLICY_BODY" -onone
-    az resource wait --created --timeout 120 --interval 20 --ids "$RESOURCEIDPREFIX" --api-version "$APIVERSION"
+    az resource wait --created --timeout 60 --interval 10 --ids "$RESOURCEIDPREFIX" --api-version "$APIVERSION"
     [ $? != 0 ] && echo "JIT policy creation failed" && return 1
     local INITIATE_BODY=$(<<< "$VM_IDS" jq --slurp -R 'split("\n")[:-1] | {
         virtualMachines: map(
@@ -183,7 +183,64 @@ azure_vm_jit_in_rg() {
     [ $? != 0 ] && echo "JIT initiate creation failed" && return 2
     [ -z "$STARTTIMEUTC" ] && echo "JIT initiate, bad response" && return 3
     local VMCNT=$(<<< "$VM_IDS" wc -l)
-    az resource wait --timeout 120 --interval 20 --ids "$RESOURCEIDPREFIX" --api-version "$APIVERSION" \
+    az resource wait --timeout 60 --interval 10 --ids "$RESOURCEIDPREFIX" --api-version "$APIVERSION" \
       --custom "\`$VMCNT\`==length(properties.requests[?startTimeUtc=='$STARTTIMEUTC'].virtualMachines[].ports[?status!='Initiating'][])"
     echo "jit request completed, result: $(az rest --method get --url "$RESOURCEIDPREFIX?api-version=2015-06-01-preview" --query 'properties.requests[?startTimeUtc==`'"$STARTTIMEUTC"'`].virtualMachines' -oyaml)"
+}
+
+labenv_main() {
+    # main function for lab environment
+    local cmd="help"
+    while [ "$#" -gt 0 ]; do        
+        case "$1" in
+            -h|--help|help)
+                cmd="help"
+                break
+                ;;
+            provision)
+                cmd="provision"
+                shift
+                break
+                ;;
+            cleanup)
+                cmd="cleanup"
+                shift
+                break
+                ;;
+            --) shift; break ;;
+            *) echo "unknown argument: $1" >&2; exit 1 ;;
+        esac
+    done
+    case $cmd in
+        help)
+            echo "available commands:"
+            echo "  provision     provision lab environment"
+            echo "  cleanup       cleanup lab environment"
+            ;;
+        provision)
+            labenv_provision "$@"
+            ;;
+        cleanup)
+            labenv_cleanup "$@"
+            ;;
+    esac
+}
+
+labenv_cleanup() {
+    set -x
+    [ -f "$SCRIPTDIR/env.sh" ] || { echo "env.sh not found, nothing to cleanup" >&2; return 1; }
+    . "$SCRIPTDIR/env.sh"
+    [ -z "$LAB_RG" ] && { echo "LAB_RG not set in env.sh, aborting cleanup" >&2; return 1; }
+    az group delete -n "$LAB_RG"
+    rm -i "$SCRIPTDIR/env.sh"
+}
+
+labenv_provision() {
+    set -x
+    getenv "$SCRIPTDIR/env.sh"
+    declare -f -F provision >/dev/null || {
+        "provision function not defined" >&2
+        return 1
+    }
+    provision "$@"
 }
