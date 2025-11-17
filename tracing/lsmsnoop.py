@@ -23,6 +23,7 @@ CHANGELOG
 2025-07-09 add --found-level
 2025-07-10 --failure-only now can optionally specify errno
            rename found-level to propagate-found, move impl into ebpf
+2025-11-17 fix compiling error in linux 6.8 aarch64 due to missing sched.h
 Copyright (c) 2025, Ping He.
 License: MIT
 """
@@ -137,6 +138,7 @@ def find_all_security_funcs(btf):
 bpf_text = r'''
 #include <uapi/linux/ptrace.h>
 #include <uapi/linux/bpf_perf_event.h>
+#include <linux/sched.h>
 /* For older versions of bcc/libbpf, supports up to PT_REGS_PARM5 */
 #ifndef MAX_PT_REGS_ARGS
 #error "must define MAX_PT_REGS_ARGS"
